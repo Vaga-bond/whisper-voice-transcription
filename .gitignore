@@ -1,0 +1,28 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Environnement (IMPORTANT: contient la clé API)
+.env
+
+# Audio temporaire (mais garder sounds/)
+temp_audio/
+*.tmp
+
+# Build
+build/
+dist/
+*.exe
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
