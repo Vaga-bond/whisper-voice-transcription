@@ -384,19 +384,36 @@ class VoiceTranscriptionApp:
                         command=lambda idx=real_index, n=name: self._change_microphone(idx, n)
                     )
                 
-                # Trouver l'index réel du micro actuel
-                if hasattr(self, 'microphone_name'):
-                    try:
-                        current_device = next(d for d in input_devices if d['name'] == self.microphone_name)
-                        self.selected_device_index = current_device['index']
-                    except:
-                        # Si le micro actuel n'est plus dans la liste filtrée, prendre le premier
+                # Sélectionner le microphone par défaut de Windows
+                try:
+                    default_input_idx = sd.default.device[0]
+                    if default_input_idx is not None and default_input_idx >= 0:
+                        # Trouver le périphérique par défaut dans la liste filtrée
+                        default_device = None
+                        for device_info in input_devices:
+                            if device_info['index'] == default_input_idx:
+                                default_device = device_info
+                                break
+                        
+                        if default_device:
+                            self.selected_device_index = default_device['index']
+                            self.microphone_name = default_device['name']
+                            self.mic_var.set(self.microphone_name)
+                        else:
+                            # Si le micro par défaut n'est pas dans la liste filtrée, prendre le premier
+                            self.selected_device_index = input_devices[0]['index']
+                            self.microphone_name = input_devices[0]['name']
+                            self.mic_var.set(self.microphone_name)
+                    else:
+                        # Pas de micro par défaut, prendre le premier
                         self.selected_device_index = input_devices[0]['index']
                         self.microphone_name = input_devices[0]['name']
                         self.mic_var.set(self.microphone_name)
-                else:
+                except:
+                    # En cas d'erreur, prendre le premier
                     self.selected_device_index = input_devices[0]['index']
                     self.microphone_name = input_devices[0]['name']
+                    self.mic_var.set(self.microphone_name)
                 
                 # Mettre à jour l'affichage
                 self.mic_display_label.config(text=self.microphone_name)
