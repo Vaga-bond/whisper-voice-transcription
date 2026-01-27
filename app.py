@@ -9,6 +9,7 @@ from tkinter import scrolledtext, messagebox
 import threading
 import os
 import tempfile
+import time
 from datetime import datetime
 import pyperclip
 from dotenv import load_dotenv
@@ -35,10 +36,14 @@ class VoiceTranscriptionApp:
         
         # État de l'application
         self.is_recording = False
+        self.is_transcribing = False  # Indique si une transcription est en cours
+        self.cancel_requested = False  # Flag pour annuler la transcription
         self.audio_frames = []
         self.audio_stream = None
         self.audio = None
         self.recording_thread = None
+        self.recording_start_time = None  # Timestamp du début d'enregistrement
+        self.selected_device_index = None  # Index du microphone sélectionné
         
         # Historique pour undo (Ctrl+Z)
         self.text_history = []
@@ -52,6 +57,9 @@ class VoiceTranscriptionApp:
         self.CHANNELS = 1
         self.RATE = 44100
         self.DTYPE = np.int16
+        
+        # Durée maximum d'enregistrement (en secondes, modifiable via slider)
+        self.max_recording_duration = 60  # Par défaut 60 secondes
         
         # Client OpenAI
         api_key = os.getenv('OPENAI_API_KEY')
@@ -72,23 +80,25 @@ class VoiceTranscriptionApp:
             self.root.destroy()
             return
         
-        # Vérifier et afficher le microphone disponible
+        # Détecter le microphone par défaut
         try:
-            # Obtenir l'index du périphérique d'entrée par défaut
             default_input_idx = sd.default.device[0]
             if default_input_idx is not None and default_input_idx >= 0:
                 device_info = sd.query_devices(default_input_idx)
                 self.microphone_name = device_info.get('name', 'Micro inconnu')
+                self.selected_device_index = default_input_idx
             else:
-                # Essayer de trouver n'importe quel périphérique d'entrée
                 devices = sd.query_devices()
                 input_devices = [d for d in devices if d['max_input_channels'] > 0]
                 if input_devices:
                     self.microphone_name = input_devices[0]['name']
+                    self.selected_device_index = 0
                 else:
                     self.microphone_name = "Aucun micro détecté"
+                    self.selected_device_index = None
         except Exception as e:
             self.microphone_name = f"Micro par défaut (erreur: {str(e)[:30]})"
+            self.selected_device_index = None
         
         # Chemin des sons
         self.sounds_dir = os.path.join(os.path.dirname(__file__), 'sounds')
@@ -109,9 +119,18 @@ class VoiceTranscriptionApp:
     def setup_ui(self):
         """Crée l'interface utilisateur"""
         
-        # Frame principal
-        main_frame = tk.Frame(self.root, padx=20, pady=20)
-        main_frame.pack(fill=tk.BOTH, expand=True)
+        # Frame principal avec layout horizontal
+        main_container = tk.Frame(self.root)
+        main_container.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+        
+        # Colonne de gauche (options)
+        left_panel = tk.Frame(main_container, width=180)
+        left_panel.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 20))
+        left_panel.pack_propagate(False)
+        
+        # Colonne principale (contenu)
+        main_frame = tk.Frame(main_container)
+        main_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         
         # Titre
         title_label = tk.Label(
@@ -119,21 +138,39 @@ class VoiceTranscriptionApp:
             text="🎙️ Transcription Vocale",
             font=("Arial", 16, "bold")
         )
-        title_label.pack(pady=(0, 20))
+        title_label.pack(pady=(0, 15))
+        
+        # Frame pour les boutons d'enregistrement
+        record_button_frame = tk.Frame(main_frame)
+        record_button_frame.pack(pady=10)
         
         # Bouton Enregistrer/Arrêter
         self.record_button = tk.Button(
-            main_frame,
+            record_button_frame,
             text="🎤 Démarrer l'enregistrement",
             font=("Arial", 12),
             bg="#4CAF50",
             fg="white",
             activebackground="#45a049",
             command=self.toggle_recording,
-            width=30,
+            width=25,
             height=2
         )
-        self.record_button.pack(pady=10)
+        self.record_button.pack(side=tk.LEFT, padx=5)
+        
+        # Bouton Annuler (caché par défaut)
+        self.cancel_button = tk.Button(
+            record_button_frame,
+            text="❌ Annuler",
+            font=("Arial", 12),
+            bg="#ff9800",
+            fg="white",
+            activebackground="#f57c00",
+            command=self.cancel_recording,
+            width=15,
+            height=2
+        )
+        # Ne pas packer pour l'instant, sera affiché pendant l'enregistrement
         
         # Indicateur d'enregistrement
         self.status_label = tk.Label(
@@ -144,24 +181,86 @@ class VoiceTranscriptionApp:
         )
         self.status_label.pack()
         
-        # Affichage du microphone utilisé
-        mic_name = getattr(self, 'microphone_name', 'Chargement...')
-        self.mic_label = tk.Label(
-            main_frame,
-            text=f"🎤 Micro: {mic_name}",
-            font=("Arial", 9),
-            fg="gray"
-        )
-        self.mic_label.pack(pady=(0, 5))
         
         # Affichage du raccourci clavier
         self.hotkey_label = tk.Label(
             main_frame,
-            text="⌨️ Raccourci: Ctrl+Alt+9 (pavé numérique) - Global",
+            text="⌨️ Ctrl+Alt+9 (global)",
             font=("Arial", 9),
             fg="blue"
         )
         self.hotkey_label.pack(pady=(0, 10))
+        
+        # Panel gauche : Options avec cadre
+        options_frame = tk.LabelFrame(
+            left_panel,
+            text="Options",
+            font=("Arial", 10, "bold"),
+            padx=10,
+            pady=10
+        )
+        options_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Microphone actuel
+        tk.Label(
+            options_frame,
+            text="Micro:",
+            font=("Arial", 9)
+        ).pack(anchor=tk.W, pady=(0, 2))
+        
+        self.mic_display_label = tk.Label(
+            options_frame,
+            text=getattr(self, 'microphone_name', 'Chargement...'),
+            font=("Arial", 8),
+            fg="gray",
+            wraplength=150,
+            justify=tk.LEFT
+        )
+        self.mic_display_label.pack(anchor=tk.W, pady=(0, 5))
+        
+        # Sélection du microphone
+        tk.Label(
+            options_frame,
+            text="Changer:",
+            font=("Arial", 9)
+        ).pack(anchor=tk.W, pady=(5, 2))
+        
+        self.mic_var = tk.StringVar()
+        self.mic_dropdown = tk.OptionMenu(options_frame, self.mic_var, "Chargement...")
+        self.mic_dropdown.config(width=18, font=("Arial", 8))
+        self.mic_dropdown.pack(anchor=tk.W, pady=(0, 10))
+        
+        # Curseur pour la durée maximum (horizontal)
+        tk.Label(
+            options_frame,
+            text="Durée max:",
+            font=("Arial", 9)
+        ).pack(anchor=tk.W, pady=(5, 2))
+        
+        self.duration_var = tk.IntVar(value=60)
+        self.duration_slider = tk.Scale(
+            options_frame,
+            from_=5,
+            to=900,  # 15 minutes max
+            orient=tk.HORIZONTAL,
+            variable=self.duration_var,
+            length=150,
+            command=self._on_duration_change,
+            resolution=30,  # Snap à 30 secondes (demi-minutes)
+            showvalue=False  # Retirer le chiffre en secondes qui suit le curseur
+        )
+        self.duration_slider.pack(fill=tk.X, pady=5, padx=5)
+        
+        self.duration_label = tk.Label(
+            options_frame,
+            text="1 min",
+            font=("Arial", 9, "bold"),
+            fg="blue"
+        )
+        self.duration_label.pack(pady=(0, 0))
+        
+        # Charger la liste des microphones (après que l'interface soit créée)
+        self.root.after(100, self._load_microphones)
         
         # Zone de texte pour la transcription
         text_frame = tk.Frame(main_frame)
@@ -177,51 +276,186 @@ class VoiceTranscriptionApp:
             text_frame,
             wrap=tk.WORD,
             font=("Arial", 11),
-            height=20,  # Augmenté de 15 à 20
-            width=70    # Augmenté de 60 à 70
+            height=20,
+            width=70
         )
         self.text_area.pack(fill=tk.BOTH, expand=True, pady=(5, 0))
         
-        # Raccourci Ctrl+Z pour undo (amélioré)
+        # Raccourci Ctrl+Z pour undo
         self.text_area.bind('<Control-z>', self.undo_clear)
         self.text_area.bind('<Control-Z>', self.undo_clear)
-        # Aussi depuis la fenêtre principale
         self.root.bind('<Control-z>', self.undo_clear)
         self.root.bind('<Control-Z>', self.undo_clear)
         
         # Boutons d'action
         button_frame = tk.Frame(main_frame)
-        button_frame.pack(pady=10)
+        button_frame.pack(pady=15, fill=tk.X)
         
         self.clear_button = tk.Button(
             button_frame,
             text="🗑️ Effacer",
             command=self.clear_text,
-            width=15,
-            bg="#f44336",  # Rouge
+            width=18,
+            height=1,
+            bg="#f44336",
             fg="white",
-            activebackground="#da190b",  # Rouge foncé au survol
-            activeforeground="white"
+            activebackground="#da190b",
+            activeforeground="white",
+            font=("Arial", 10)
         )
-        self.clear_button.pack(side=tk.LEFT, padx=5)
+        self.clear_button.pack(side=tk.LEFT, padx=10, fill=tk.X, expand=True)
         
         self.copy_button = tk.Button(
             button_frame,
-            text="📋 Copier",
+            text="📋 Copier tout",
             command=self.copy_to_clipboard,
-            width=15
+            width=18,
+            height=1,
+            font=("Arial", 10)
         )
-        self.copy_button.pack(side=tk.LEFT, padx=5)
+        self.copy_button.pack(side=tk.LEFT, padx=10, fill=tk.X, expand=True)
+    
+    def _load_microphones(self):
+        """Charge la liste des microphones disponibles (filtrés et dédupliqués)"""
+        try:
+            devices = sd.query_devices()
+            
+            # Mots-clés à exclure (périphériques virtuels, mappers, etc.)
+            exclude_keywords = [
+                'mixage', 'mix', 'stereo mix', 'stéréo mix',
+                'mapper', 'microsoft', 'mappeur',
+                'entrée ligne', 'line in', 'line-in',
+                'what u hear', 'wave out mix',
+                'steam streaming',
+                'pilote', 'driver', 'system32', '.sys',
+                'input (speaker', 'input (headphone',
+                'wave speaker', 'wave microphone headphone'
+            ]
+            
+            # Filtrer les périphériques d'entrée réels
+            input_devices = []
+            seen_names = set()  # Pour dédupliquer par nom exact
+            
+            for idx, device in enumerate(devices):
+                if device['max_input_channels'] > 0:
+                    name = device['name']
+                    name_lower = name.lower()
+                    
+                    # Exclure les périphériques avec patterns suspects
+                    if '@' in name or 'system32' in name_lower or '.sys' in name_lower:
+                        continue
+                    
+                    # Exclure les périphériques virtuels/non-microphones par mots-clés
+                    if any(keyword in name_lower for keyword in exclude_keywords):
+                        continue
+                    
+                    # Dédupliquer par nom exact (même nom = même périphérique, peu importe le hostapi)
+                    # Normaliser le nom (enlever espaces en fin, parenthèses manquantes, etc.)
+                    normalized_name = name.strip()
+                    # Corriger les noms tronqués (ajouter parenthèse fermante si manquante)
+                    if normalized_name.count('(') > normalized_name.count(')'):
+                        normalized_name += ')'
+                    
+                    if normalized_name not in seen_names:
+                        seen_names.add(normalized_name)
+                        input_devices.append({
+                            'index': idx,  # Index réel dans sd.query_devices()
+                            'name': normalized_name,
+                            'device': device
+                        })
+            
+            if input_devices:
+                # Trier par nom pour une meilleure lisibilité
+                input_devices.sort(key=lambda x: x['name'])
+                
+                device_names = [d['name'] for d in input_devices]
+                current_mic = self.microphone_name if hasattr(self, 'microphone_name') else device_names[0]
+                self.mic_var.set(current_mic)
+                
+                # Recréer le menu avec les microphones filtrés
+                menu = self.mic_dropdown['menu']
+                menu.delete(0, 'end')
+                
+                for device_info in input_devices:
+                    name = device_info['name']
+                    real_index = device_info['index']  # Index réel du périphérique
+                    menu.add_command(
+                        label=name,
+                        command=lambda idx=real_index, n=name: self._change_microphone(idx, n)
+                    )
+                
+                # Trouver l'index réel du micro actuel
+                if hasattr(self, 'microphone_name'):
+                    try:
+                        current_device = next(d for d in input_devices if d['name'] == self.microphone_name)
+                        self.selected_device_index = current_device['index']
+                    except:
+                        # Si le micro actuel n'est plus dans la liste filtrée, prendre le premier
+                        self.selected_device_index = input_devices[0]['index']
+                        self.microphone_name = input_devices[0]['name']
+                        self.mic_var.set(self.microphone_name)
+                else:
+                    self.selected_device_index = input_devices[0]['index']
+                    self.microphone_name = input_devices[0]['name']
+                
+                # Mettre à jour l'affichage
+                self.mic_display_label.config(text=self.microphone_name)
+        except Exception as e:
+            print(f"Erreur chargement microphones: {e}")
+    
+    def _change_microphone(self, device_index, device_name):
+        """Change le microphone sélectionné"""
+        try:
+            self.selected_device_index = device_index
+            self.microphone_name = device_name
+            self.mic_var.set(device_name)
+            self.mic_display_label.config(text=device_name)
+            print(f"Microphone changé: {device_name} (index: {device_index})")
+        except Exception as e:
+            print(f"Erreur changement microphone: {e}")
+    
+    def _on_duration_change(self, value):
+        """Appelé quand le curseur change"""
+        # Arrondir à la demi-minute la plus proche (snap à 30 secondes)
+        raw_value = int(float(value))
+        # Arrondir à la demi-minute la plus proche
+        rounded_value = round(raw_value / 30) * 30
+        
+        # Si la valeur a changé, mettre à jour le slider
+        if rounded_value != self.max_recording_duration:
+            self.max_recording_duration = rounded_value
+            # Mettre à jour la valeur du slider sans déclencher le callback
+            self.duration_var.set(rounded_value)
+        
+        # Afficher en minutes (toujours des multiples de 30 secondes)
+        if self.max_recording_duration >= 60:
+            minutes = self.max_recording_duration // 60
+            seconds = self.max_recording_duration % 60
+            if seconds == 0:
+                display = f"{minutes} min"
+            else:
+                display = f"{minutes} min {seconds}s"
+        else:
+            # En dessous de 60 secondes, on garde les secondes mais on snap quand même
+            display = f"{self.max_recording_duration}s"
+        
+        self.duration_label.config(text=display)
     
     def toggle_recording(self):
         """Bascule entre démarrer et arrêter l'enregistrement"""
+        # Empêcher les appels parallèles
+        if self.is_transcribing:
+            # Une transcription est en cours, jouer un son d'erreur
+            self.play_sound('error.wav', volume=0.3)
+            return
+        
         if not self.is_recording:
             self.start_recording()
         else:
             self.stop_recording()
     
-    def play_sound(self, filename):
-        """Joue un son (WAV) avec volume réduit à 50%"""
+    def play_sound(self, filename, volume=0.5):
+        """Joue un son (WAV) avec volume réglable"""
         try:
             sound_path = os.path.join(self.sounds_dir, filename)
             # Essayer WAV d'abord
@@ -232,7 +466,7 @@ class VoiceTranscriptionApp:
             if os.path.exists(sound_path):
                 # Utiliser pygame pour contrôler le volume
                 sound = pygame.mixer.Sound(sound_path)
-                sound.set_volume(0.5)  # 50% du volume
+                sound.set_volume(volume)  # Volume réglable (0.0 à 1.0)
                 sound.play()
         except Exception as e:
             # Fallback sur winsound si pygame échoue
@@ -244,23 +478,44 @@ class VoiceTranscriptionApp:
     
     def start_recording(self):
         """Démarre l'enregistrement audio"""
+        # Double vérification (au cas où)
+        if self.is_transcribing:
+            self.play_sound('error.wav', volume=0.3)
+            return
+        
         self.is_recording = True
+        self.cancel_requested = False
         self.audio_frames = []
+        self.recording_start_time = time.time()
         
         # Jouer le son de début
         self.play_sound('start.wav')
         
         # Mettre à jour l'interface
         self.record_button.config(
-            text="⏹️ Arrêter l'enregistrement",
+            text="⏹️ Arrêter",
             bg="#f44336",
             activebackground="#da190b"
         )
+        # Afficher le bouton Annuler
+        self.cancel_button.pack(side=tk.LEFT, padx=5)
         self.status_label.config(text="🔴 Enregistrement en cours...", fg="red")
         
         # Démarrer l'enregistrement dans un thread séparé
         self.recording_thread = threading.Thread(target=self._record_audio, daemon=True)
         self.recording_thread.start()
+    
+    def cancel_recording(self):
+        """Annule l'enregistrement sans faire l'appel API"""
+        if self.is_recording:
+            self.is_recording = False
+            self.cancel_requested = True
+            self.audio_frames = []
+            # Jouer le son d'erreur pour feedback sonore
+            self.play_sound('error.wav', volume=0.3)
+            self._reset_ui("Enregistrement annulé")
+            self.status_label.config(text="❌ Enregistrement annulé", fg="orange")
+            self.root.after(2000, lambda: self.status_label.config(text="", fg="gray"))
     
     def stop_recording(self):
         """Arrête l'enregistrement et transcrit"""
@@ -268,6 +523,13 @@ class VoiceTranscriptionApp:
             return
         
         self.is_recording = False
+        
+        # Cacher le bouton Annuler
+        self.cancel_button.pack_forget()
+        
+        # Jouer le son léger indiquant que l'enregistrement est arrêté (avant transcription)
+        self.play_sound('recording_stopped.wav', volume=0.2)
+        
         self.status_label.config(text="⏳ Traitement en cours...", fg="orange")
         self.record_button.config(state=tk.DISABLED)
         
@@ -275,29 +537,55 @@ class VoiceTranscriptionApp:
         threading.Thread(target=self._process_recording, daemon=True).start()
     
     def _record_audio(self):
-        """Enregistre l'audio dans un thread séparé"""
+        """Enregistre l'audio dans un thread séparé (durée max configurable)"""
         try:
             # Enregistrer avec sounddevice
-            while self.is_recording:
+            # Utiliser le microphone sélectionné si disponible
+            device = self.selected_device_index if self.selected_device_index is not None else None
+            
+            while self.is_recording and not self.cancel_requested:
+                # Vérifier si on a dépassé la durée maximum
+                if self.recording_start_time and (time.time() - self.recording_start_time) >= self.max_recording_duration:
+                    # Arrêter automatiquement après la durée max
+                    self.root.after(0, lambda: self._auto_stop_recording())
+                    break
+                
                 # Enregistrer un chunk de 0.1 seconde
                 chunk = sd.rec(
                     int(0.1 * self.RATE),
                     samplerate=self.RATE,
                     channels=self.CHANNELS,
-                    dtype=self.DTYPE
+                    dtype=self.DTYPE,
+                    device=device
                 )
-                sd.wait()  # Attendre que l'enregistrement soit terminé
-                self.audio_frames.append(chunk.tobytes())
+                sd.wait()
+                if not self.cancel_requested:
+                    self.audio_frames.append(chunk.tobytes())
         
         except Exception as e:
             self.root.after(0, lambda: messagebox.showerror("Erreur", f"Erreur d'enregistrement: {e}"))
             self.is_recording = False
     
+    def _auto_stop_recording(self):
+        """Arrête automatiquement l'enregistrement après 1 minute"""
+        if self.is_recording:
+            self.stop_recording()
+    
     def _process_recording(self):
         """Traite l'enregistrement et transcrit"""
+        # Vérifier si l'annulation a été demandée
+        if self.cancel_requested:
+            self.is_transcribing = False
+            return
+        
+        # Marquer qu'une transcription est en cours
+        self.is_transcribing = True
+        
         try:
-            if not self.audio_frames:
-                self.root.after(0, lambda: self._reset_ui("Aucun audio enregistré"))
+            if not self.audio_frames or self.cancel_requested:
+                self.is_transcribing = False
+                if not self.cancel_requested:
+                    self.root.after(0, lambda: self._reset_ui("Aucun audio enregistré"))
                 return
             
             # Sauvegarder dans un fichier temporaire
@@ -313,15 +601,41 @@ class VoiceTranscriptionApp:
             wf.writeframes(b''.join(self.audio_frames))
             wf.close()
             
+            # Vérifier si l'annulation a été demandée avant de lancer l'API
+            if self.cancel_requested:
+                os.unlink(temp_filename)
+                self.is_transcribing = False
+                return
+            
+            # Vérifier si l'annulation a été demandée avant de lancer l'API
+            if self.cancel_requested:
+                os.unlink(temp_filename)
+                self.is_transcribing = False
+                return
+            
             # Transcrit avec OpenAI Whisper
             self.root.after(0, lambda: self.status_label.config(text="🔄 Transcription en cours...", fg="blue"))
             
+            # Note: Une fois l'appel API lancé, on ne peut pas l'annuler facilement
+            # Mais on peut éviter de lancer l'appel si cancel_requested est True
             with open(temp_filename, 'rb') as audio_file:
                 transcript = self.client.audio.transcriptions.create(
                     model="whisper-1",
                     file=audio_file,
-                    language="fr"  # Français par défaut, peut être changé
+                    language="fr"
                 )
+            
+            # Vérifier à nouveau après l'appel
+            if self.cancel_requested:
+                os.unlink(temp_filename)
+                self.is_transcribing = False
+                return
+            
+            # Vérifier à nouveau après l'appel (au cas où)
+            if self.cancel_requested:
+                os.unlink(temp_filename)
+                self.is_transcribing = False
+                return
             
             text = transcript.text
             
@@ -332,6 +646,7 @@ class VoiceTranscriptionApp:
             self.root.after(0, lambda: self._display_text(text))
             
         except Exception as e:
+            self.is_transcribing = False
             error_msg = f"Erreur lors de la transcription: {e}"
             self.root.after(0, lambda: messagebox.showerror("Erreur", error_msg))
             self.root.after(0, lambda: self._reset_ui("Erreur"))
@@ -364,20 +679,16 @@ class VoiceTranscriptionApp:
     def _paste_to_active_field(self, text):
         """Colle le texte dans le champ actif (si possible)"""
         try:
-            # Attendre un peu pour s'assurer que la transcription est terminée
-            import time
             time.sleep(0.2)
-            
-            # Simuler Ctrl+V pour coller dans le champ actif
-            # pyautogui permet de simuler les raccourcis clavier
             pyautogui.hotkey('ctrl', 'v')
-            
         except Exception as e:
-            # Si ça échoue, ce n'est pas grave, le texte est déjà dans le presse-papier
             pass
         
         # Réinitialiser l'interface
         self._reset_ui()
+        
+        # Marquer que la transcription est terminée
+        self.is_transcribing = False
     
     def _reset_ui(self, status_text="Prêt"):
         """Réinitialise l'interface après l'enregistrement"""
@@ -387,12 +698,17 @@ class VoiceTranscriptionApp:
             activebackground="#45a049",
             state=tk.NORMAL
         )
+        # Cacher le bouton Annuler
+        self.cancel_button.pack_forget()
+        
         if status_text == "Prêt":
             self.status_label.config(text="", fg="gray")
         else:
             self.status_label.config(text=status_text, fg="gray")
         
         self.audio_frames = []
+        self.recording_start_time = None
+        self.cancel_requested = False
     
     def clear_text(self):
         """Efface le contenu de la zone de texte"""
@@ -455,6 +771,12 @@ class VoiceTranscriptionApp:
         def on_press(key):
             """Détecte quand une touche est pressée"""
             try:
+                # Détecter Échap (seulement pendant l'enregistrement)
+                if key == pynput_keyboard.Key.esc:
+                    if self.is_recording:
+                        self.root.after(0, self.cancel_recording)
+                    return  # Ne pas traiter Échap comme une autre touche
+                
                 # Gérer les touches spéciales (Ctrl, Alt)
                 if key == pynput_keyboard.Key.ctrl_l or key == pynput_keyboard.Key.ctrl_r:
                     self.pressed_keys.add('ctrl')
