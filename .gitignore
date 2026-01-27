@@ -12,6 +12,10 @@ __pycache__/
 # Audio temporaire (mais garder sounds/)
 temp_audio/
 *.tmp
+*.wav.tmp
+
+# Fichiers de debug/analyse
+*_analysis.json
 
 # Build
 build/
