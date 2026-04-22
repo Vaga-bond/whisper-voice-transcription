@@ -57,6 +57,70 @@ DEFAULT_PREFS = {
 
 ENV_FILE = Path(__file__).parent / ".env"
 
+# pystray + Pillow sont optionnels : l'app démarre aussi sans, la tray est juste désactivée.
+try:
+    import pystray
+    from PIL import Image, ImageDraw
+    TRAY_AVAILABLE = True
+except ImportError:
+    TRAY_AVAILABLE = False
+
+
+class FloatingOverlay:
+    """Petite fenêtre transparente toujours au-dessus, visible même si l'app
+    principale est réduite ou cachée dans la tray. Affiche l'état courant
+    (enregistrement, transcription, résultat) et se masque d'elle-même après
+    les événements brefs."""
+
+    def __init__(self, root):
+        self.root = root
+        self.win = tk.Toplevel(root)
+        self.win.overrideredirect(True)       # pas de bordure ni barre de titre
+        self.win.attributes('-topmost', True)
+        self.win.attributes('-alpha', 0.82)
+        self.win.configure(bg='#c62828')
+
+        self.label = tk.Label(
+            self.win,
+            text="",
+            font=("Segoe UI", 13, "bold"),
+            bg='#c62828',
+            fg='white',
+            padx=22,
+            pady=8
+        )
+        self.label.pack()
+
+        self._hide_after_id = None
+        self.win.withdraw()
+
+    def _reposition(self):
+        """Centre horizontalement, ~30px du haut de l'écran principal."""
+        self.win.update_idletasks()
+        screen_w = self.win.winfo_screenwidth()
+        w = self.win.winfo_width()
+        self.win.geometry(f"+{max((screen_w - w) // 2, 10)}+30")
+
+    def show(self, text, bg='#c62828'):
+        if self._hide_after_id is not None:
+            self.root.after_cancel(self._hide_after_id)
+            self._hide_after_id = None
+        self.label.config(text=text, bg=bg)
+        self.win.configure(bg=bg)
+        self._reposition()
+        self.win.deiconify()
+        self.win.attributes('-topmost', True)   # garantir au-dessus après deiconify
+
+    def show_briefly(self, text, bg, duration_ms=1500):
+        self.show(text, bg)
+        self._hide_after_id = self.root.after(duration_ms, self.hide)
+
+    def hide(self):
+        if self._hide_after_id is not None:
+            self.root.after_cancel(self._hide_after_id)
+            self._hide_after_id = None
+        self.win.withdraw()
+
 
 class VoiceTranscriptionApp:
     def __init__(self, root):
@@ -143,8 +207,12 @@ class VoiceTranscriptionApp:
         # Interface (créée en premier pour affichage immédiat)
         self.setup_ui()
 
-        # Initialisations lourdes différées (pygame + hotkey) pour que la fenêtre
-        # s'affiche instantanément, sans frame noir ni délai visible au lancement.
+        # Overlay flottant (créé après la fenêtre principale pour héritage correct)
+        self.overlay = FloatingOverlay(self.root)
+
+        # Initialisations lourdes différées (pygame + hotkey + tray) pour que la
+        # fenêtre s'affiche instantanément, sans frame noir ni délai visible.
+        self.tray_icon = None
         self.root.after(100, self._deferred_init)
     
     def setup_ui(self):
@@ -622,6 +690,90 @@ class VoiceTranscriptionApp:
             print(f"⚠️ Init pygame mixer échouée: {e}")
 
         self.setup_global_hotkey()
+        self._setup_tray()
+
+    def _make_tray_icon_image(self):
+        """Génère programmatiquement l'icône de la tray (évite de shipper un binaire)."""
+        img = Image.new('RGBA', (64, 64), (0, 0, 0, 0))
+        d = ImageDraw.Draw(img)
+        d.ellipse((4, 4, 60, 60), fill=(220, 50, 50, 255))       # fond rouge
+        # Corps du micro (rectangle arrondi, fallback si Pillow ancien)
+        try:
+            d.rounded_rectangle((24, 16, 40, 40), radius=8, fill=(255, 255, 255, 255))
+        except AttributeError:
+            d.rectangle((24, 16, 40, 40), fill=(255, 255, 255, 255))
+        d.rectangle((30, 40, 34, 48), fill=(255, 255, 255, 255))  # pied
+        d.rectangle((22, 48, 42, 52), fill=(255, 255, 255, 255))  # base
+        return img
+
+    def _setup_tray(self):
+        """Crée l'icône de la barre système avec menu clic-droit (Afficher/Quitter).
+        Si pystray/Pillow ne sont pas installés, la tray est simplement désactivée."""
+        if not TRAY_AVAILABLE:
+            print("ℹ️ pystray/Pillow non installés — fonctionnement sans tray.")
+            return
+
+        try:
+            icon_image = self._make_tray_icon_image()
+
+            def on_show(icon, item):
+                self.root.after(0, self._restore_window)
+
+            def on_quit(icon, item):
+                self.root.after(0, self._quit_app)
+
+            menu = pystray.Menu(
+                pystray.MenuItem("Afficher", on_show, default=True),
+                pystray.MenuItem("Quitter", on_quit),
+            )
+
+            self.tray_icon = pystray.Icon(
+                "whisper-voice",
+                icon_image,
+                "Transcription Vocale",
+                menu
+            )
+
+            self.tray_thread = threading.Thread(target=self.tray_icon.run, daemon=True)
+            self.tray_thread.start()
+            print("✅ Icône système (tray) activée")
+        except Exception as e:
+            print(f"⚠️ Impossible d'initialiser la tray: {e}")
+            self.tray_icon = None
+
+    def _restore_window(self):
+        """Ré-affiche la fenêtre principale depuis la tray."""
+        self.root.deiconify()
+        self.root.lift()
+        self.root.focus_force()
+
+    def _hide_to_tray(self):
+        """Masque la fenêtre dans la tray au lieu de quitter (appelé sur clic X)."""
+        if self.tray_icon is not None:
+            self.root.withdraw()
+        else:
+            # Pas de tray disponible — fermer normalement
+            self._quit_app()
+
+    def _quit_app(self):
+        """Quitte proprement : sauvegarde, arrêt de la tray, destruction de la fenêtre."""
+        try:
+            self._save_history()
+            self._save_prefs()
+        except Exception as e:
+            print(f"⚠️ Erreur sauvegarde à la fermeture: {e}")
+
+        if self.tray_icon is not None:
+            try:
+                self.tray_icon.stop()
+            except Exception:
+                pass
+            self.tray_icon = None
+
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
 
     def _update_api_key_status(self, ok):
         """Affiche l'état de la clé API dans le panneau d'options"""
@@ -824,7 +976,8 @@ class VoiceTranscriptionApp:
         self.month_cost_label.config(text=f"${month_cost:.4f}")
 
     def _update_recording_timer(self):
-        """Met à jour le timer d'enregistrement dans la barre de statut (toutes les 500ms)"""
+        """Met à jour le timer d'enregistrement (barre de statut + overlay flottant).
+        Tick toutes les 500ms tant que l'enregistrement est actif."""
         if not self.is_recording or self.recording_start_time is None:
             return
         elapsed = time.time() - self.recording_start_time
@@ -835,10 +988,15 @@ class VoiceTranscriptionApp:
             s = int(secs % 60)
             return f"{m:02d}:{s:02d}"
 
+        timer_text = f"{fmt(elapsed)} / {fmt(max_sec)}"
         self.status_label.config(
-            text=f"🔴 Enregistrement  {fmt(elapsed)} / {fmt(max_sec)}",
+            text=f"🔴 Enregistrement  {timer_text}",
             fg="red"
         )
+        # Overlay flottant (visible même app réduite/cachée)
+        if hasattr(self, 'overlay'):
+            self.overlay.show(f"🔴 {timer_text}", bg="#c62828")
+
         self.root.after(500, self._update_recording_timer)
     
     def _on_duration_change(self, value):
@@ -958,6 +1116,8 @@ class VoiceTranscriptionApp:
             self._reset_ui("Enregistrement annulé")
             self.status_label.config(text="❌ Enregistrement annulé", fg="orange")
             self.root.after(2000, lambda: self.status_label.config(text="Prêt", fg="gray"))
+            if hasattr(self, 'overlay'):
+                self.overlay.show_briefly("❌ Annulé", bg="#ff9800", duration_ms=1500)
     
     def stop_recording(self):
         """Arrête l'enregistrement et transcrit"""
@@ -971,9 +1131,11 @@ class VoiceTranscriptionApp:
         
         # Jouer le son léger indiquant que l'enregistrement est arrêté (avant transcription)
         self.play_sound('recording_stopped.wav', volume=0.2)
-        
+
         self.status_label.config(text="⏳ Traitement en cours...", fg="orange")
         self.record_button.config(state=tk.DISABLED)
+        if hasattr(self, 'overlay'):
+            self.overlay.show("⏳ Transcription…", bg="#1565c0")
         
         # Arrêter l'enregistrement dans un thread séparé
         threading.Thread(target=self._process_recording, daemon=True).start()
@@ -1166,6 +1328,11 @@ class VoiceTranscriptionApp:
         self._reset_ui(status_text)
         self.status_label.config(text=status_text, fg=status_color)
 
+        # Overlay flottant : flash bref pour confirmer le résultat
+        if hasattr(self, 'overlay'):
+            overlay_bg = "#2e7d32" if status_color == "green" else "#ff9800"
+            self.overlay.show_briefly(status_text, bg=overlay_bg, duration_ms=1800)
+
         # Marquer que la transcription est terminée
         self.is_transcribing = False
     
@@ -1300,16 +1467,9 @@ def main():
     root = tk.Tk()
     app = VoiceTranscriptionApp(root)
 
-    def on_closing():
-        """Gestion de la fermeture : on sauvegarde l'historique avant de quitter"""
-        try:
-            if hasattr(app, 'history'):
-                app._save_history()
-        except Exception as e:
-            print(f"⚠️ Erreur sauvegarde finale: {e}")
-        root.destroy()
-
-    root.protocol("WM_DELETE_WINDOW", on_closing)
+    # Le X de la fenêtre réduit dans la tray (si disponible), sinon quitte.
+    # Pour réellement quitter, utiliser le menu clic-droit de la tray.
+    root.protocol("WM_DELETE_WINDOW", app._hide_to_tray)
 
     # Démarrer la boucle principale
     root.mainloop()
