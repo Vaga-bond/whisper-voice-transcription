@@ -53,6 +53,8 @@ DEFAULT_PREFS = {
     "auto_copy": True,    # Laisser le texte dans le presse-papier après transcription
     "auto_paste": True,   # Injecter le texte dans le champ actif (indépendant de auto_copy)
     "sound_enabled": True,
+    "overlay_enabled": True,                 # Afficher l'overlay flottant pendant les états
+    "minimize_to_tray_on_close": True,       # La croix réduit dans la tray au lieu de quitter
 }
 
 ENV_FILE = Path(__file__).parent / ".env"
@@ -67,17 +69,18 @@ except ImportError:
 
 
 class FloatingOverlay:
-    """Petite fenêtre transparente toujours au-dessus, visible même si l'app
-    principale est réduite ou cachée dans la tray. Affiche l'état courant
-    (enregistrement, transcription, résultat) et se masque d'elle-même après
-    les événements brefs."""
+    """Petite fenêtre transparente toujours au-dessus et **click-through** (les
+    clics passent à travers vers la fenêtre du dessous). Visible même si l'app
+    est réduite ou dans la tray. Affiche l'état courant (enregistrement,
+    transcription, résultat) et se masque après les événements brefs."""
 
     def __init__(self, root):
         self.root = root
+        self.enabled = True
         self.win = tk.Toplevel(root)
         self.win.overrideredirect(True)       # pas de bordure ni barre de titre
         self.win.attributes('-topmost', True)
-        self.win.attributes('-alpha', 0.82)
+        self.win.attributes('-alpha', 0.68)   # un peu plus transparent (~32%)
         self.win.configure(bg='#c62828')
 
         self.label = tk.Label(
@@ -94,14 +97,39 @@ class FloatingOverlay:
         self._hide_after_id = None
         self.win.withdraw()
 
+        # Activer le click-through sur Windows (WS_EX_TRANSPARENT) : la souris
+        # traverse l'overlay et interagit avec ce qu'il y a derrière.
+        # Nécessite que la fenêtre soit créée côté OS → on appelle update_idletasks.
+        self.win.update_idletasks()
+        self._enable_click_through()
+
+    def _enable_click_through(self):
+        """Active le click-through (Windows uniquement). Degrade silencieusement ailleurs."""
+        try:
+            import ctypes
+            hwnd = self.win.winfo_id()
+            GWL_EXSTYLE = -20
+            WS_EX_LAYERED = 0x00080000
+            WS_EX_TRANSPARENT = 0x00000020
+            user32 = ctypes.windll.user32
+            style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+            user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style | WS_EX_LAYERED | WS_EX_TRANSPARENT)
+        except Exception as e:
+            print(f"⚠️ Click-through overlay non activé: {e}")
+
     def _reposition(self):
-        """Centre horizontalement, ~30px du haut de l'écran principal."""
+        """Centre horizontalement, ~30px du haut de l'écran principal.
+        winfo_screenwidth/height retournent la taille de l'écran où se trouve
+        le widget → ça suit automatiquement l'écran principal de Windows."""
         self.win.update_idletasks()
         screen_w = self.win.winfo_screenwidth()
         w = self.win.winfo_width()
         self.win.geometry(f"+{max((screen_w - w) // 2, 10)}+30")
 
     def show(self, text, bg='#c62828'):
+        if not self.enabled:
+            self.hide()
+            return
         if self._hide_after_id is not None:
             self.root.after_cancel(self._hide_after_id)
             self._hide_after_id = None
@@ -112,12 +140,17 @@ class FloatingOverlay:
         self.win.attributes('-topmost', True)   # garantir au-dessus après deiconify
 
     def show_briefly(self, text, bg, duration_ms=1500):
+        if not self.enabled:
+            return
         self.show(text, bg)
         self._hide_after_id = self.root.after(duration_ms, self.hide)
 
     def hide(self):
         if self._hide_after_id is not None:
-            self.root.after_cancel(self._hide_after_id)
+            try:
+                self.root.after_cancel(self._hide_after_id)
+            except Exception:
+                pass
             self._hide_after_id = None
         self.win.withdraw()
 
@@ -185,9 +218,13 @@ class VoiceTranscriptionApp:
         self.auto_copy_var = tk.BooleanVar(value=bool(self.prefs.get("auto_copy", True)))
         self.auto_paste_var = tk.BooleanVar(value=bool(self.prefs.get("auto_paste", True)))
         self.sound_enabled_var = tk.BooleanVar(value=bool(self.prefs.get("sound_enabled", True)))
+        self.overlay_enabled_var = tk.BooleanVar(value=bool(self.prefs.get("overlay_enabled", True)))
+        self.minimize_to_tray_var = tk.BooleanVar(value=bool(self.prefs.get("minimize_to_tray_on_close", True)))
         self.auto_copy_var.trace_add('write', lambda *_: self._save_prefs())
         self.auto_paste_var.trace_add('write', lambda *_: self._save_prefs())
         self.sound_enabled_var.trace_add('write', lambda *_: self._save_prefs())
+        self.overlay_enabled_var.trace_add('write', lambda *_: self._on_overlay_toggle())
+        self.minimize_to_tray_var.trace_add('write', lambda *_: self._save_prefs())
 
         # Client OpenAI — non bloquant si la clé est absente (l'utilisateur peut la
         # renseigner via l'UI). Le bouton d'enregistrement affichera un message
@@ -209,6 +246,7 @@ class VoiceTranscriptionApp:
 
         # Overlay flottant (créé après la fenêtre principale pour héritage correct)
         self.overlay = FloatingOverlay(self.root)
+        self.overlay.enabled = self.overlay_enabled_var.get()
 
         # Initialisations lourdes différées (pygame + hotkey + tray) pour que la
         # fenêtre s'affiche instantanément, sans frame noir ni délai visible.
@@ -423,6 +461,22 @@ class VoiceTranscriptionApp:
             options_frame,
             text="Sons activés",
             variable=self.sound_enabled_var,
+            font=("Arial", 8),
+            anchor="w"
+        ).pack(anchor=tk.W, fill=tk.X)
+
+        tk.Checkbutton(
+            options_frame,
+            text="Afficher l'overlay",
+            variable=self.overlay_enabled_var,
+            font=("Arial", 8),
+            anchor="w"
+        ).pack(anchor=tk.W, fill=tk.X)
+
+        tk.Checkbutton(
+            options_frame,
+            text="Réduire à la fermeture",
+            variable=self.minimize_to_tray_var,
             font=("Arial", 8),
             anchor="w"
         ).pack(anchor=tk.W, fill=tk.X)
@@ -748,12 +802,23 @@ class VoiceTranscriptionApp:
         self.root.focus_force()
 
     def _hide_to_tray(self):
-        """Masque la fenêtre dans la tray au lieu de quitter (appelé sur clic X)."""
-        if self.tray_icon is not None:
+        """Appelé sur clic X. Respecte la préférence utilisateur :
+        - si tray disponible + option activée → masque dans la tray
+        - sinon → quitte réellement l'application."""
+        wants_hide = (hasattr(self, 'minimize_to_tray_var')
+                      and self.minimize_to_tray_var.get())
+        if self.tray_icon is not None and wants_hide:
             self.root.withdraw()
         else:
-            # Pas de tray disponible — fermer normalement
             self._quit_app()
+
+    def _on_overlay_toggle(self):
+        """Réaction au changement du toggle overlay : applique + sauvegarde."""
+        if hasattr(self, 'overlay'):
+            self.overlay.enabled = self.overlay_enabled_var.get()
+            if not self.overlay.enabled:
+                self.overlay.hide()
+        self._save_prefs()
 
     def _quit_app(self):
         """Quitte proprement : sauvegarde, arrêt de la tray, destruction de la fenêtre."""
@@ -910,6 +975,8 @@ class VoiceTranscriptionApp:
                 "auto_copy": self.auto_copy_var.get() if hasattr(self, 'auto_copy_var') else True,
                 "auto_paste": self.auto_paste_var.get() if hasattr(self, 'auto_paste_var') else True,
                 "sound_enabled": self.sound_enabled_var.get() if hasattr(self, 'sound_enabled_var') else True,
+                "overlay_enabled": self.overlay_enabled_var.get() if hasattr(self, 'overlay_enabled_var') else True,
+                "minimize_to_tray_on_close": self.minimize_to_tray_var.get() if hasattr(self, 'minimize_to_tray_var') else True,
             }
             with open(PREFS_FILE, 'w', encoding='utf-8') as f:
                 json.dump(prefs, f, ensure_ascii=False, indent=2)
