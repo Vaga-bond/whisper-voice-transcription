@@ -72,7 +72,7 @@ Voir `requirements.txt` pour les versions.
 - `sounds/` — sons de feedback
 - `transcription_history.json` — historique des transcriptions (local, non versionné)
 - `user_preferences.json` — préférences UI persistées (local, non versionné)
-- `setup.bat`, `start.bat`, `start_console.bat`, `update_dependencies.bat` — scripts de gestion
+- `setup.bat`, `start.bat`, `start_console.bat` — scripts de gestion
 
 ## Notes
 
