@@ -55,6 +55,7 @@ DEFAULT_PREFS = {
     "sound_enabled": True,
     "overlay_enabled": True,                 # Afficher l'overlay flottant pendant les états
     "minimize_to_tray_on_close": True,       # La croix réduit dans la tray au lieu de quitter
+    "terminal_paste": False,                 # Coller avec Ctrl+Shift+V (compatible terminaux)
 }
 
 ENV_FILE = Path(__file__).parent / ".env"
@@ -104,16 +105,31 @@ class FloatingOverlay:
         self._enable_click_through()
 
     def _enable_click_through(self):
-        """Active le click-through (Windows uniquement). Degrade silencieusement ailleurs."""
+        """Active le click-through (Windows uniquement).
+
+        On ajoute SEULEMENT WS_EX_TRANSPARENT — tkinter a déjà positionné
+        WS_EX_LAYERED via l'attribut `-alpha`. Toucher LAYERED ici casse le
+        rendu (fenêtre toute noire) parce qu'on interfère avec l'alpha managée
+        par tk. Après SetWindowLongW, un SetWindowPos avec SWP_FRAMECHANGED est
+        nécessaire pour que la modification du style étendu soit committée.
+        """
         try:
             import ctypes
-            hwnd = self.win.winfo_id()
+            hwnd = int(self.win.wm_frame(), 16)
             GWL_EXSTYLE = -20
-            WS_EX_LAYERED = 0x00080000
             WS_EX_TRANSPARENT = 0x00000020
+            SWP_NOMOVE = 0x0002
+            SWP_NOSIZE = 0x0001
+            SWP_NOZORDER = 0x0004
+            SWP_FRAMECHANGED = 0x0020
             user32 = ctypes.windll.user32
+
             style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-            user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style | WS_EX_LAYERED | WS_EX_TRANSPARENT)
+            user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style | WS_EX_TRANSPARENT)
+            user32.SetWindowPos(
+                hwnd, 0, 0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED
+            )
         except Exception as e:
             print(f"⚠️ Click-through overlay non activé: {e}")
 
@@ -220,11 +236,13 @@ class VoiceTranscriptionApp:
         self.sound_enabled_var = tk.BooleanVar(value=bool(self.prefs.get("sound_enabled", True)))
         self.overlay_enabled_var = tk.BooleanVar(value=bool(self.prefs.get("overlay_enabled", True)))
         self.minimize_to_tray_var = tk.BooleanVar(value=bool(self.prefs.get("minimize_to_tray_on_close", True)))
+        self.terminal_paste_var = tk.BooleanVar(value=bool(self.prefs.get("terminal_paste", False)))
         self.auto_copy_var.trace_add('write', lambda *_: self._save_prefs())
         self.auto_paste_var.trace_add('write', lambda *_: self._save_prefs())
         self.sound_enabled_var.trace_add('write', lambda *_: self._save_prefs())
         self.overlay_enabled_var.trace_add('write', lambda *_: self._on_overlay_toggle())
         self.minimize_to_tray_var.trace_add('write', lambda *_: self._save_prefs())
+        self.terminal_paste_var.trace_add('write', lambda *_: self._save_prefs())
 
         # Client OpenAI — non bloquant si la clé est absente (l'utilisateur peut la
         # renseigner via l'UI). Le bouton d'enregistrement affichera un message
@@ -477,6 +495,14 @@ class VoiceTranscriptionApp:
             options_frame,
             text="Réduire à la fermeture",
             variable=self.minimize_to_tray_var,
+            font=("Arial", 8),
+            anchor="w"
+        ).pack(anchor=tk.W, fill=tk.X)
+
+        tk.Checkbutton(
+            options_frame,
+            text="Coller pour terminal (Ctrl+Maj+V)",
+            variable=self.terminal_paste_var,
             font=("Arial", 8),
             anchor="w"
         ).pack(anchor=tk.W, fill=tk.X)
@@ -812,6 +838,31 @@ class VoiceTranscriptionApp:
         else:
             self._quit_app()
 
+    # Classes de fenêtre natives des terminaux Windows connus. Les terminaux
+    # intégrés des éditeurs Electron (Cursor, VS Code) ne sont PAS ici car ils
+    # partagent la classe de l'éditeur — pour ceux-là, activer le toggle manuel.
+    _TERMINAL_WINDOW_CLASSES = {
+        'CASCADIA_HOSTING_WINDOW_CLASS',   # Windows Terminal
+        'ConsoleWindowClass',              # cmd, PowerShell classique
+        'PuTTY',
+        'mintty',                          # Git Bash, msys2
+    }
+
+    def _is_terminal_window_focused(self):
+        """Retourne True si la fenêtre au premier plan est un terminal natif.
+        Ignorer les erreurs : sur non-Windows ou si ctypes échoue, on renvoie False."""
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            hwnd = user32.GetForegroundWindow()
+            if not hwnd:
+                return False
+            buf = ctypes.create_unicode_buffer(256)
+            user32.GetClassNameW(hwnd, buf, 256)
+            return buf.value in self._TERMINAL_WINDOW_CLASSES
+        except Exception:
+            return False
+
     def _on_overlay_toggle(self):
         """Réaction au changement du toggle overlay : applique + sauvegarde."""
         if hasattr(self, 'overlay'):
@@ -977,6 +1028,7 @@ class VoiceTranscriptionApp:
                 "sound_enabled": self.sound_enabled_var.get() if hasattr(self, 'sound_enabled_var') else True,
                 "overlay_enabled": self.overlay_enabled_var.get() if hasattr(self, 'overlay_enabled_var') else True,
                 "minimize_to_tray_on_close": self.minimize_to_tray_var.get() if hasattr(self, 'minimize_to_tray_var') else True,
+                "terminal_paste": self.terminal_paste_var.get() if hasattr(self, 'terminal_paste_var') else False,
             }
             with open(PREFS_FILE, 'w', encoding='utf-8') as f:
                 json.dump(prefs, f, ensure_ascii=False, indent=2)
@@ -1363,7 +1415,15 @@ class VoiceTranscriptionApp:
             try:
                 pyperclip.copy(text)
                 time.sleep(0.15)
-                pyautogui.hotkey('ctrl', 'v')
+                # Utiliser Ctrl+Maj+V si :
+                #  - l'option manuelle est activée (utile pour terminaux intégrés
+                #    type Cursor/VS Code où la détection par classe de fenêtre échoue)
+                #  - OU si la fenêtre active est un terminal connu (Windows Terminal,
+                #    cmd classique, PuTTY, mintty…)
+                if self.terminal_paste_var.get() or self._is_terminal_window_focused():
+                    pyautogui.hotkey('ctrl', 'shift', 'v')
+                else:
+                    pyautogui.hotkey('ctrl', 'v')
                 # Laisser le temps au collage de se terminer avant de restaurer
                 time.sleep(0.15)
             except Exception:
