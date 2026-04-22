@@ -135,9 +135,11 @@ class FloatingOverlay:
       La position est persistée via le callback `on_position_saved`.
     """
 
-    HANDLE_SIZE = 18
-    HANDLE_OFFSET = 9            # décalage de la poignée par rapport à l'overlay (débord)
     CORNER_RADIUS = 14
+    HANDLE_DEBORD = 2           # Débord visuel de la poignée hors de l'overlay (px)
+    ALPHA_OVERLAY = 0.68
+    ALPHA_HANDLE_REST = 0.55    # Poignée plus discrète que l'overlay au repos
+    ALPHA_HANDLE_ACTIVE = 0.95  # Au survol / pendant le drag
 
     def __init__(self, root, on_position_saved=None):
         self.root = root
@@ -147,12 +149,15 @@ class FloatingOverlay:
         self._hide_after_id = None
         self._drag_offset_x = 0
         self._drag_offset_y = 0
+        self._drag_handle_dx = 0  # delta poignée→overlay capturé au début du drag
+        self._drag_handle_dy = 0
+        self._is_dragging = False
 
         # --- Overlay principal (click-through) ---
         self.win = tk.Toplevel(root)
         self.win.overrideredirect(True)
         self.win.attributes('-topmost', True)
-        self.win.attributes('-alpha', 0.68)
+        self.win.attributes('-alpha', self.ALPHA_OVERLAY)
         self.win.configure(bg='#c62828')
         self.label = tk.Label(
             self.win, text="", font=("Segoe UI", 13, "bold"),
@@ -161,20 +166,24 @@ class FloatingOverlay:
         self.label.pack()
 
         # --- Poignée de drag (NON click-through, cliquable) ---
+        # Même fond que l'overlay (mis à jour dans show()), dots blancs pour le contraste.
+        # Alpha dynamique : discret au repos, plus prononcé au survol/drag.
         self.handle = tk.Toplevel(root)
         self.handle.overrideredirect(True)
         self.handle.attributes('-topmost', True)
-        self.handle.attributes('-alpha', 0.88)
-        self.handle.configure(bg='#ffffff')
+        self.handle.attributes('-alpha', self.ALPHA_HANDLE_REST)
+        self.handle.configure(bg='#c62828')
         self.handle_label = tk.Label(
-            self.handle, text="⠿", font=("Segoe UI", 10, "bold"),
-            bg='#ffffff', fg='#333', cursor='fleur',
+            self.handle, text="⠿", font=("Segoe UI", 9, "bold"),
+            bg='#c62828', fg='#ffffff', cursor='fleur',
         )
         self.handle_label.pack(padx=2, pady=0)
         for widget in (self.handle, self.handle_label):
             widget.bind('<Button-1>', self._on_drag_start)
             widget.bind('<B1-Motion>', self._on_drag_motion)
             widget.bind('<ButtonRelease-1>', self._on_drag_release)
+            widget.bind('<Enter>', self._on_handle_enter, add='+')
+            widget.bind('<Leave>', self._on_handle_leave, add='+')
 
         # Cachés par défaut, apparaissent lors d'un état
         self.win.withdraw()
@@ -242,6 +251,7 @@ class FloatingOverlay:
         au centre-haut de l'écran principal. Clampe aux bornes de l'écran pour
         éviter qu'il ne sorte après changement de résolution ou d'écran principal."""
         self.win.update_idletasks()
+        self.handle.update_idletasks()
         screen_w = self.win.winfo_screenwidth()
         screen_h = self.win.winfo_screenheight()
         w = self.win.winfo_width()
@@ -261,24 +271,57 @@ class FloatingOverlay:
         self._position_handle()
 
     def _position_handle(self):
-        """Positionne la poignée en haut-gauche de l'overlay, en léger débord."""
+        """Place la poignée en bas-droite de l'overlay, en très léger débord."""
+        self.win.update_idletasks()
+        self.handle.update_idletasks()
         overlay_x = self.win.winfo_rootx()
         overlay_y = self.win.winfo_rooty()
-        hx = max(0, overlay_x - self.HANDLE_OFFSET)
-        hy = max(0, overlay_y - self.HANDLE_OFFSET)
-        self.handle.geometry(f"+{hx}+{hy}")
+        overlay_w = self.win.winfo_width()
+        overlay_h = self.win.winfo_height()
+        handle_w = self.handle.winfo_width()
+        handle_h = self.handle.winfo_height()
+        # Coin bas-droite, avec ~2px de débord sur la droite et en bas
+        hx = overlay_x + overlay_w - handle_w + self.HANDLE_DEBORD
+        hy = overlay_y + overlay_h - handle_h + self.HANDLE_DEBORD
+        self.handle.geometry(f"+{max(0, hx)}+{max(0, hy)}")
+
+    def _on_handle_enter(self, event):
+        """Au survol : poignée plus opaque pour retour visuel."""
+        try:
+            self.handle.attributes('-alpha', self.ALPHA_HANDLE_ACTIVE)
+        except Exception:
+            pass
+
+    def _on_handle_leave(self, event):
+        """Quand la souris quitte : retour à l'alpha discret (sauf pendant un drag)."""
+        if self._is_dragging:
+            return
+        try:
+            self.handle.attributes('-alpha', self.ALPHA_HANDLE_REST)
+        except Exception:
+            pass
 
     def _on_drag_start(self, event):
+        # Offset du clic dans la poignée
         self._drag_offset_x = event.x_root - self.handle.winfo_rootx()
         self._drag_offset_y = event.y_root - self.handle.winfo_rooty()
+        # Delta poignée → overlay capturé une fois au début (indépendant de la
+        # géométrie, fonctionne qu'on place la poignée haut-gauche ou bas-droite)
+        self._drag_handle_dx = self.handle.winfo_rootx() - self.win.winfo_rootx()
+        self._drag_handle_dy = self.handle.winfo_rooty() - self.win.winfo_rooty()
+        self._is_dragging = True
+        try:
+            self.handle.attributes('-alpha', self.ALPHA_HANDLE_ACTIVE)
+        except Exception:
+            pass
 
     def _on_drag_motion(self, event):
         new_handle_x = event.x_root - self._drag_offset_x
         new_handle_y = event.y_root - self._drag_offset_y
-        new_overlay_x = new_handle_x + self.HANDLE_OFFSET
-        new_overlay_y = new_handle_y + self.HANDLE_OFFSET
+        new_overlay_x = new_handle_x - self._drag_handle_dx
+        new_overlay_y = new_handle_y - self._drag_handle_dy
 
-        # Clamp aux bornes de l'écran
+        # Clamp aux bornes de l'écran (sécurité multi-écran)
         screen_w = self.win.winfo_screenwidth()
         screen_h = self.win.winfo_screenheight()
         w = self.win.winfo_width()
@@ -287,12 +330,15 @@ class FloatingOverlay:
         new_overlay_y = max(0, min(new_overlay_y, max(0, screen_h - h)))
 
         self.win.geometry(f"+{new_overlay_x}+{new_overlay_y}")
-        self.handle.geometry(
-            f"+{max(0, new_overlay_x - self.HANDLE_OFFSET)}"
-            f"+{max(0, new_overlay_y - self.HANDLE_OFFSET)}"
-        )
+        # Repositionner la poignée relativement à la nouvelle position de l'overlay
+        self._position_handle()
 
     def _on_drag_release(self, event):
+        self._is_dragging = False
+        try:
+            self.handle.attributes('-alpha', self.ALPHA_HANDLE_REST)
+        except Exception:
+            pass
         x = self.win.winfo_rootx()
         y = self.win.winfo_rooty()
         self.custom_position = (x, y)
@@ -308,6 +354,9 @@ class FloatingOverlay:
             self._hide_after_id = None
         self.label.config(text=text, bg=bg)
         self.win.configure(bg=bg)
+        # Poignée : même couleur que l'overlay pour qu'elle s'y intègre visuellement
+        self.handle.configure(bg=bg)
+        self.handle_label.configure(bg=bg)
         self.win.update_idletasks()
         # Re-appliquer les arrondis car la taille change avec le texte
         self._apply_rounded_corners_to_overlay()
@@ -452,7 +501,7 @@ class VoiceTranscriptionApp:
         main_container.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
         
         # Colonne de gauche (options) — élargie pour que les libellés tiennent
-        left_panel = tk.Frame(main_container, width=220)
+        left_panel = tk.Frame(main_container, width=240)
         left_panel.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 20))
         left_panel.pack_propagate(False)
         
@@ -557,7 +606,7 @@ class VoiceTranscriptionApp:
             text=getattr(self, 'microphone_name', 'Chargement...'),
             font=("Arial", 8),
             fg="gray",
-            wraplength=190,
+            wraplength=210,
             justify=tk.LEFT,
             anchor="w"
         )
@@ -572,7 +621,7 @@ class VoiceTranscriptionApp:
         
         self.mic_var = tk.StringVar()
         self.mic_dropdown = tk.OptionMenu(options_frame, self.mic_var, "Chargement...")
-        self.mic_dropdown.config(width=22, font=("Arial", 8), anchor="w")
+        self.mic_dropdown.config(width=24, font=("Arial", 8), anchor="w")
         self.mic_dropdown.pack(anchor=tk.W, fill=tk.X, pady=(0, 10))
 
         # Sélection du modèle de transcription
@@ -588,7 +637,7 @@ class VoiceTranscriptionApp:
         )
         self.model_var = tk.StringVar(value=default_model_label)
         self.model_dropdown = tk.OptionMenu(options_frame, self.model_var, default_model_label)
-        self.model_dropdown.config(width=22, font=("Arial", 8), anchor="w")
+        self.model_dropdown.config(width=24, font=("Arial", 8), anchor="w")
         self.model_dropdown.pack(anchor=tk.W, fill=tk.X, pady=(0, 10))
 
         model_menu = self.model_dropdown['menu']
@@ -661,11 +710,11 @@ class VoiceTranscriptionApp:
         ToolTip(
             self.terminal_paste_checkbox,
             "Par défaut, le collage se fait avec Ctrl+V (fonctionne partout).\n\n"
-            "Coche cette option si tu colles souvent dans un terminal intégré "
+            "À cocher si vous collez souvent dans un terminal intégré "
             "(Cursor, VS Code, Windows Terminal…) qui n'accepte que Ctrl+Maj+V. "
             "Les terminaux autonomes sont détectés automatiquement.\n\n"
-            "⚠ Quelques vieilles apps (Notepad) ne reconnaissent pas Ctrl+Maj+V "
-            "comme « coller » — à décocher dans ce cas."
+            "⚠ Quelques vieilles applications (Notepad) ne reconnaissent pas "
+            "Ctrl+Maj+V comme « coller » — à décocher dans ce cas."
         )
 
         tk.Checkbutton(
