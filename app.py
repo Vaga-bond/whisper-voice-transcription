@@ -160,10 +160,10 @@ class VoiceTranscriptionApp:
         self.root = root
         self.root.title("Transcription Vocale - Whisper")
         # Taille par défaut plus grande et adaptée à un écran standard
-        self.root.geometry("800x700")
+        self.root.geometry("800x800")
         self.root.resizable(True, True)
         # Taille minimale pour éviter que la fenêtre soit trop petite
-        self.root.minsize(600, 400)
+        self.root.minsize(600, 500)
         
         # État de l'application
         self.is_recording = False
