@@ -9,6 +9,13 @@ __pycache__/
 # Environnement (IMPORTANT: contient la clé API)
 .env
 
+# Données utilisateur locales (ne jamais commiter sur repo public)
+transcription_history.json
+user_preferences.json
+
+# État local de Claude Code (dépend de la session de dev, pas du projet)
+.claude/
+
 # Audio temporaire (mais garder sounds/)
 temp_audio/
 *.tmp
