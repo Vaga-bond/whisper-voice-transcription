@@ -138,7 +138,7 @@ class FloatingOverlay:
     CORNER_RADIUS = 14
     HANDLE_DEBORD = 2           # Débord visuel de la poignée hors de l'overlay (px)
     ALPHA_OVERLAY = 0.68
-    ALPHA_HANDLE_REST = 0.55    # Poignée plus discrète que l'overlay au repos
+    ALPHA_HANDLE_REST = 0.78    # Un peu plus opaque que l'overlay, pour que les points soient lisibles
     ALPHA_HANDLE_ACTIVE = 0.95  # Au survol / pendant le drag
 
     def __init__(self, root, on_position_saved=None):
@@ -147,6 +147,7 @@ class FloatingOverlay:
         self.custom_position = None  # (x, y) coin haut-gauche de l'overlay, None = défaut centré-haut
         self.on_position_saved = on_position_saved
         self._hide_after_id = None
+        self._handle_show_after_id = None  # affichage différé de la poignée (anti-jitter)
         self._drag_offset_x = 0
         self._drag_offset_y = 0
         self._drag_handle_dx = 0  # delta poignée→overlay capturé au début du drag
@@ -174,7 +175,7 @@ class FloatingOverlay:
         self.handle.attributes('-alpha', self.ALPHA_HANDLE_REST)
         self.handle.configure(bg='#c62828')
         self.handle_label = tk.Label(
-            self.handle, text="⠿", font=("Segoe UI", 9, "bold"),
+            self.handle, text="⠿", font=("Segoe UI", 10, "bold"),
             bg='#c62828', fg='#ffffff', cursor='fleur',
         )
         self.handle_label.pack(padx=2, pady=0)
@@ -352,18 +353,54 @@ class FloatingOverlay:
         if self._hide_after_id is not None:
             self.root.after_cancel(self._hide_after_id)
             self._hide_after_id = None
+
         self.label.config(text=text, bg=bg)
         self.win.configure(bg=bg)
         # Poignée : même couleur que l'overlay pour qu'elle s'y intègre visuellement
         self.handle.configure(bg=bg)
         self.handle_label.configure(bg=bg)
-        self.win.update_idletasks()
-        # Re-appliquer les arrondis car la taille change avec le texte
-        self._apply_rounded_corners_to_overlay()
-        self._reposition()
-        self.win.deiconify()
-        self.handle.deiconify()
+
+        # Tk ne finalise la géométrie d'un Toplevel qu'une fois mappé. Au premier
+        # show, un update_idletasks() ne suffit donc pas : la fenêtre apparaît
+        # brièvement à une taille pré-layout puis se redimensionne (flash visible).
+        # Parade : au premier show, on la rend invisible (alpha=0) et on la place
+        # hors écran, on force un cycle d'événements pour que tk mesure vraiment,
+        # puis on la replace à la bonne position et on rétablit l'alpha.
+        first_show = not self.win.winfo_viewable()
+        if first_show:
+            self.win.attributes('-alpha', 0.0)
+            self.win.geometry("+-10000+-10000")
+            self.win.deiconify()
+            self.win.update()   # force la matérialisation complète du layout
+            self._apply_rounded_corners_to_overlay()
+            self._reposition()
+            self.win.attributes('-alpha', self.ALPHA_OVERLAY)
+        else:
+            self.win.update_idletasks()
+            self._apply_rounded_corners_to_overlay()
+            self._reposition()
+
         self.win.attributes('-topmost', True)
+
+        # Poignée : affichage différé (~30ms) si pas déjà visible — laisse le
+        # temps à tk de finaliser totalement avant qu'on la positionne.
+        if not self.handle.winfo_viewable():
+            if self._handle_show_after_id is not None:
+                try:
+                    self.root.after_cancel(self._handle_show_after_id)
+                except Exception:
+                    pass
+            self._handle_show_after_id = self.root.after(30, self._show_handle_delayed)
+
+    def _show_handle_delayed(self):
+        """Affiche la poignée après que l'overlay principal ait fini son layout."""
+        self._handle_show_after_id = None
+        # Si entre-temps l'overlay a été masqué ou désactivé, on renonce
+        if not self.enabled or not self.win.winfo_viewable():
+            return
+        # Re-positionner maintenant que les tailles sont réellement définitives
+        self._position_handle()
+        self.handle.deiconify()
         self.handle.attributes('-topmost', True)
 
     def show_briefly(self, text, bg, duration_ms=1500):
@@ -379,6 +416,13 @@ class FloatingOverlay:
             except Exception:
                 pass
             self._hide_after_id = None
+        # Annuler l'affichage différé de la poignée si en attente
+        if self._handle_show_after_id is not None:
+            try:
+                self.root.after_cancel(self._handle_show_after_id)
+            except Exception:
+                pass
+            self._handle_show_after_id = None
         self.win.withdraw()
         self.handle.withdraw()
 
