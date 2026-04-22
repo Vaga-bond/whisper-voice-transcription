@@ -14,22 +14,24 @@ pip install --upgrade pip
 pip install -r requirements.txt
 
 echo.
-echo Configuration de l'API...
+echo Configuration de la cle API...
 if not exist .env (
     echo Copie de .env.example vers .env...
     copy .env.example .env
     echo.
-    echo ⚠️ IMPORTANT: Editez .env et ajoutez votre clé API OpenAI
-    echo    Obtenez votre clé sur: https://platform.openai.com/api-keys
+    echo Cle API OpenAI requise. Deux options :
+    echo   1. La renseigner via l'interface de l'app ^(bouton "Modifier la cle..."^)
+    echo   2. L'editer manuellement dans le fichier .env
+    echo Obtenez votre cle sur: https://platform.openai.com/api-keys
     echo.
 ) else (
     echo Fichier .env existe deja
 )
 
 echo.
-echo ✅ Installation terminée !
+echo Installation terminee.
 echo.
-echo Pour démarrer l'application:
+echo Pour demarrer l'application:
 echo   start.bat
 echo   OU
 echo   venv\Scripts\activate
