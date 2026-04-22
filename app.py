@@ -56,6 +56,7 @@ DEFAULT_PREFS = {
     "overlay_enabled": True,                 # Afficher l'overlay flottant pendant les états
     "minimize_to_tray_on_close": True,       # La croix réduit dans la tray au lieu de quitter
     "terminal_paste": False,                 # Coller avec Ctrl+Shift+V (compatible terminaux)
+    "overlay_position": None,                # [x, y] de l'overlay après drag utilisateur
 }
 
 ENV_FILE = Path(__file__).parent / ".env"
@@ -69,78 +70,234 @@ except ImportError:
     TRAY_AVAILABLE = False
 
 
-class FloatingOverlay:
-    """Petite fenêtre transparente toujours au-dessus et **click-through** (les
-    clics passent à travers vers la fenêtre du dessous). Visible même si l'app
-    est réduite ou dans la tray. Affiche l'état courant (enregistrement,
-    transcription, résultat) et se masque après les événements brefs."""
+class ToolTip:
+    """Tooltip minimaliste en pur tkinter (pas de dep).
+    Apparaît après 400ms de survol, disparaît sur Leave ou clic."""
 
-    def __init__(self, root):
+    def __init__(self, widget, text, wraplength=240, delay_ms=400):
+        self.widget = widget
+        self.text = text
+        self.wraplength = wraplength
+        self.delay_ms = delay_ms
+        self.tip_window = None
+        self._after_id = None
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+        widget.bind("<ButtonPress>", self._hide, add="+")
+
+    def _schedule(self, event=None):
+        self._cancel()
+        self._after_id = self.widget.after(self.delay_ms, self._show)
+
+    def _cancel(self):
+        if self._after_id is not None:
+            try:
+                self.widget.after_cancel(self._after_id)
+            except Exception:
+                pass
+            self._after_id = None
+
+    def _show(self):
+        if self.tip_window is not None:
+            return
+        x = self.widget.winfo_rootx() + 20
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 2
+        self.tip_window = tk.Toplevel(self.widget)
+        self.tip_window.overrideredirect(True)
+        self.tip_window.attributes('-topmost', True)
+        self.tip_window.geometry(f"+{x}+{y}")
+        tk.Label(
+            self.tip_window, text=self.text,
+            background="#ffffe0", relief="solid", borderwidth=1,
+            font=("Arial", 8), wraplength=self.wraplength,
+            justify="left", padx=6, pady=4,
+        ).pack()
+
+    def _hide(self, event=None):
+        self._cancel()
+        if self.tip_window is not None:
+            try:
+                self.tip_window.destroy()
+            except Exception:
+                pass
+            self.tip_window = None
+
+
+class FloatingOverlay:
+    """Overlay translucide pour afficher l'état courant (enregistrement,
+    transcription, résultat). Visible même quand l'app est réduite/dans la tray.
+
+    Composé de deux Toplevels :
+    - `self.win` : panneau message, click-through (clics passent derrière),
+      coins arrondis, semi-transparent
+    - `self.handle` : petite bulle circulaire non-click-through, attachée au coin
+      haut-gauche de l'overlay. Permet de drag & drop pour déplacer l'ensemble.
+      La position est persistée via le callback `on_position_saved`.
+    """
+
+    HANDLE_SIZE = 18
+    HANDLE_OFFSET = 9            # décalage de la poignée par rapport à l'overlay (débord)
+    CORNER_RADIUS = 14
+
+    def __init__(self, root, on_position_saved=None):
         self.root = root
         self.enabled = True
-        self.win = tk.Toplevel(root)
-        self.win.overrideredirect(True)       # pas de bordure ni barre de titre
-        self.win.attributes('-topmost', True)
-        self.win.attributes('-alpha', 0.68)   # un peu plus transparent (~32%)
-        self.win.configure(bg='#c62828')
+        self.custom_position = None  # (x, y) coin haut-gauche de l'overlay, None = défaut centré-haut
+        self.on_position_saved = on_position_saved
+        self._hide_after_id = None
+        self._drag_offset_x = 0
+        self._drag_offset_y = 0
 
+        # --- Overlay principal (click-through) ---
+        self.win = tk.Toplevel(root)
+        self.win.overrideredirect(True)
+        self.win.attributes('-topmost', True)
+        self.win.attributes('-alpha', 0.68)
+        self.win.configure(bg='#c62828')
         self.label = tk.Label(
-            self.win,
-            text="",
-            font=("Segoe UI", 13, "bold"),
-            bg='#c62828',
-            fg='white',
-            padx=22,
-            pady=8
+            self.win, text="", font=("Segoe UI", 13, "bold"),
+            bg='#c62828', fg='white', padx=22, pady=8,
         )
         self.label.pack()
 
-        self._hide_after_id = None
-        self.win.withdraw()
+        # --- Poignée de drag (NON click-through, cliquable) ---
+        self.handle = tk.Toplevel(root)
+        self.handle.overrideredirect(True)
+        self.handle.attributes('-topmost', True)
+        self.handle.attributes('-alpha', 0.88)
+        self.handle.configure(bg='#ffffff')
+        self.handle_label = tk.Label(
+            self.handle, text="⠿", font=("Segoe UI", 10, "bold"),
+            bg='#ffffff', fg='#333', cursor='fleur',
+        )
+        self.handle_label.pack(padx=2, pady=0)
+        for widget in (self.handle, self.handle_label):
+            widget.bind('<Button-1>', self._on_drag_start)
+            widget.bind('<B1-Motion>', self._on_drag_motion)
+            widget.bind('<ButtonRelease-1>', self._on_drag_release)
 
-        # Activer le click-through sur Windows (WS_EX_TRANSPARENT) : la souris
-        # traverse l'overlay et interagit avec ce qu'il y a derrière.
-        # Nécessite que la fenêtre soit créée côté OS → on appelle update_idletasks.
+        # Cachés par défaut, apparaissent lors d'un état
+        self.win.withdraw()
+        self.handle.withdraw()
+
+        # Appliquer styles Windows (click-through, arrondis) après que les
+        # fenêtres existent effectivement côté OS.
         self.win.update_idletasks()
+        self.handle.update_idletasks()
         self._enable_click_through()
+        self._apply_rounded_corners_to_overlay()
+        self._apply_circular_shape_to_handle()
 
     def _enable_click_through(self):
-        """Active le click-through (Windows uniquement).
-
-        On ajoute SEULEMENT WS_EX_TRANSPARENT — tkinter a déjà positionné
-        WS_EX_LAYERED via l'attribut `-alpha`. Toucher LAYERED ici casse le
-        rendu (fenêtre toute noire) parce qu'on interfère avec l'alpha managée
-        par tk. Après SetWindowLongW, un SetWindowPos avec SWP_FRAMECHANGED est
-        nécessaire pour que la modification du style étendu soit committée.
-        """
+        """Ajoute WS_EX_TRANSPARENT à l'overlay principal (Windows uniquement).
+        Tkinter a déjà posé WS_EX_LAYERED via `-alpha` ; on n'y touche pas pour
+        éviter l'état « fenêtre noire ». SetWindowPos(SWP_FRAMECHANGED) commit la modif."""
         try:
             import ctypes
             hwnd = int(self.win.wm_frame(), 16)
             GWL_EXSTYLE = -20
             WS_EX_TRANSPARENT = 0x00000020
-            SWP_NOMOVE = 0x0002
-            SWP_NOSIZE = 0x0001
-            SWP_NOZORDER = 0x0004
+            SWP_NOMOVE = 0x0002; SWP_NOSIZE = 0x0001; SWP_NOZORDER = 0x0004
             SWP_FRAMECHANGED = 0x0020
             user32 = ctypes.windll.user32
-
             style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
             user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style | WS_EX_TRANSPARENT)
-            user32.SetWindowPos(
-                hwnd, 0, 0, 0, 0, 0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED
-            )
+            user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0,
+                                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED)
         except Exception as e:
             print(f"⚠️ Click-through overlay non activé: {e}")
 
+    def _apply_rounded_corners_to_overlay(self):
+        """Applique des coins arrondis via CreateRoundRectRgn (Windows, pas de dep)."""
+        try:
+            import ctypes
+            hwnd = int(self.win.wm_frame(), 16)
+            w = self.win.winfo_width()
+            h = self.win.winfo_height()
+            if w <= 1 or h <= 1:
+                return
+            region = ctypes.windll.gdi32.CreateRoundRectRgn(
+                0, 0, w + 1, h + 1, self.CORNER_RADIUS, self.CORNER_RADIUS
+            )
+            ctypes.windll.user32.SetWindowRgn(hwnd, region, True)
+        except Exception as e:
+            print(f"⚠️ Arrondi overlay non appliqué: {e}")
+
+    def _apply_circular_shape_to_handle(self):
+        """Rend la poignée parfaitement ronde via CreateEllipticRgn."""
+        try:
+            import ctypes
+            hwnd = int(self.handle.wm_frame(), 16)
+            w = self.handle.winfo_width()
+            h = self.handle.winfo_height()
+            if w <= 1 or h <= 1:
+                return
+            region = ctypes.windll.gdi32.CreateEllipticRgn(0, 0, w + 1, h + 1)
+            ctypes.windll.user32.SetWindowRgn(hwnd, region, True)
+        except Exception as e:
+            print(f"⚠️ Poignée circulaire non appliquée: {e}")
+
     def _reposition(self):
-        """Centre horizontalement, ~30px du haut de l'écran principal.
-        winfo_screenwidth/height retournent la taille de l'écran où se trouve
-        le widget → ça suit automatiquement l'écran principal de Windows."""
+        """Positionne l'overlay selon `custom_position` (sauvegardée) ou sinon
+        au centre-haut de l'écran principal. Clampe aux bornes de l'écran pour
+        éviter qu'il ne sorte après changement de résolution ou d'écran principal."""
         self.win.update_idletasks()
         screen_w = self.win.winfo_screenwidth()
+        screen_h = self.win.winfo_screenheight()
         w = self.win.winfo_width()
-        self.win.geometry(f"+{max((screen_w - w) // 2, 10)}+30")
+        h = self.win.winfo_height()
+
+        if self.custom_position is not None:
+            x, y = self.custom_position
+        else:
+            x = max((screen_w - w) // 2, 10)
+            y = 30
+
+        # Sécurité multi-écran : garder l'overlay visible
+        x = max(0, min(x, max(0, screen_w - w)))
+        y = max(0, min(y, max(0, screen_h - h)))
+
+        self.win.geometry(f"+{x}+{y}")
+        self._position_handle()
+
+    def _position_handle(self):
+        """Positionne la poignée en haut-gauche de l'overlay, en léger débord."""
+        overlay_x = self.win.winfo_rootx()
+        overlay_y = self.win.winfo_rooty()
+        hx = max(0, overlay_x - self.HANDLE_OFFSET)
+        hy = max(0, overlay_y - self.HANDLE_OFFSET)
+        self.handle.geometry(f"+{hx}+{hy}")
+
+    def _on_drag_start(self, event):
+        self._drag_offset_x = event.x_root - self.handle.winfo_rootx()
+        self._drag_offset_y = event.y_root - self.handle.winfo_rooty()
+
+    def _on_drag_motion(self, event):
+        new_handle_x = event.x_root - self._drag_offset_x
+        new_handle_y = event.y_root - self._drag_offset_y
+        new_overlay_x = new_handle_x + self.HANDLE_OFFSET
+        new_overlay_y = new_handle_y + self.HANDLE_OFFSET
+
+        # Clamp aux bornes de l'écran
+        screen_w = self.win.winfo_screenwidth()
+        screen_h = self.win.winfo_screenheight()
+        w = self.win.winfo_width()
+        h = self.win.winfo_height()
+        new_overlay_x = max(0, min(new_overlay_x, max(0, screen_w - w)))
+        new_overlay_y = max(0, min(new_overlay_y, max(0, screen_h - h)))
+
+        self.win.geometry(f"+{new_overlay_x}+{new_overlay_y}")
+        self.handle.geometry(
+            f"+{max(0, new_overlay_x - self.HANDLE_OFFSET)}"
+            f"+{max(0, new_overlay_y - self.HANDLE_OFFSET)}"
+        )
+
+    def _on_drag_release(self, event):
+        x = self.win.winfo_rootx()
+        y = self.win.winfo_rooty()
+        self.custom_position = (x, y)
+        if self.on_position_saved:
+            self.on_position_saved(x, y)
 
     def show(self, text, bg='#c62828'):
         if not self.enabled:
@@ -151,9 +308,14 @@ class FloatingOverlay:
             self._hide_after_id = None
         self.label.config(text=text, bg=bg)
         self.win.configure(bg=bg)
+        self.win.update_idletasks()
+        # Re-appliquer les arrondis car la taille change avec le texte
+        self._apply_rounded_corners_to_overlay()
         self._reposition()
         self.win.deiconify()
-        self.win.attributes('-topmost', True)   # garantir au-dessus après deiconify
+        self.handle.deiconify()
+        self.win.attributes('-topmost', True)
+        self.handle.attributes('-topmost', True)
 
     def show_briefly(self, text, bg, duration_ms=1500):
         if not self.enabled:
@@ -169,6 +331,7 @@ class FloatingOverlay:
                 pass
             self._hide_after_id = None
         self.win.withdraw()
+        self.handle.withdraw()
 
 
 class VoiceTranscriptionApp:
@@ -238,11 +401,11 @@ class VoiceTranscriptionApp:
         self.minimize_to_tray_var = tk.BooleanVar(value=bool(self.prefs.get("minimize_to_tray_on_close", True)))
         self.terminal_paste_var = tk.BooleanVar(value=bool(self.prefs.get("terminal_paste", False)))
         self.auto_copy_var.trace_add('write', lambda *_: self._save_prefs())
-        self.auto_paste_var.trace_add('write', lambda *_: self._save_prefs())
+        self.auto_paste_var.trace_add('write', lambda *_: self._on_paste_toggles_changed())
         self.sound_enabled_var.trace_add('write', lambda *_: self._save_prefs())
         self.overlay_enabled_var.trace_add('write', lambda *_: self._on_overlay_toggle())
         self.minimize_to_tray_var.trace_add('write', lambda *_: self._save_prefs())
-        self.terminal_paste_var.trace_add('write', lambda *_: self._save_prefs())
+        self.terminal_paste_var.trace_add('write', lambda *_: self._on_paste_toggles_changed())
 
         # Client OpenAI — non bloquant si la clé est absente (l'utilisateur peut la
         # renseigner via l'UI). Le bouton d'enregistrement affichera un message
@@ -263,8 +426,18 @@ class VoiceTranscriptionApp:
         self.setup_ui()
 
         # Overlay flottant (créé après la fenêtre principale pour héritage correct)
-        self.overlay = FloatingOverlay(self.root)
+        self.overlay = FloatingOverlay(
+            self.root,
+            on_position_saved=self._on_overlay_position_saved
+        )
         self.overlay.enabled = self.overlay_enabled_var.get()
+        # Restaurer la position sauvegardée (si elle existe et est bien formée)
+        saved_pos = self.prefs.get("overlay_position")
+        if isinstance(saved_pos, (list, tuple)) and len(saved_pos) == 2:
+            try:
+                self.overlay.custom_position = (int(saved_pos[0]), int(saved_pos[1]))
+            except (TypeError, ValueError):
+                pass
 
         # Initialisations lourdes différées (pygame + hotkey + tray) pour que la
         # fenêtre s'affiche instantanément, sans frame noir ni délai visible.
@@ -467,13 +640,33 @@ class VoiceTranscriptionApp:
             anchor="w"
         ).pack(anchor=tk.W, fill=tk.X, pady=(5, 0))
 
-        tk.Checkbutton(
+        self.auto_paste_checkbox = tk.Checkbutton(
             options_frame,
-            text="Coller dans le champ actif",
+            text="Coller dans le champ actif (Ctrl+V)",
             variable=self.auto_paste_var,
             font=("Arial", 8),
             anchor="w"
-        ).pack(anchor=tk.W, fill=tk.X)
+        )
+        self.auto_paste_checkbox.pack(anchor=tk.W, fill=tk.X)
+
+        self.terminal_paste_checkbox = tk.Checkbutton(
+            options_frame,
+            text="Coller pour terminal (Ctrl+Maj+V)",
+            variable=self.terminal_paste_var,
+            font=("Arial", 8),
+            anchor="w"
+        )
+        self.terminal_paste_checkbox.pack(anchor=tk.W, fill=tk.X)
+
+        ToolTip(
+            self.terminal_paste_checkbox,
+            "Par défaut, le collage se fait avec Ctrl+V (fonctionne partout).\n\n"
+            "Coche cette option si tu colles souvent dans un terminal intégré "
+            "(Cursor, VS Code, Windows Terminal…) qui n'accepte que Ctrl+Maj+V. "
+            "Les terminaux autonomes sont détectés automatiquement.\n\n"
+            "⚠ Quelques vieilles apps (Notepad) ne reconnaissent pas Ctrl+Maj+V "
+            "comme « coller » — à décocher dans ce cas."
+        )
 
         tk.Checkbutton(
             options_frame,
@@ -495,14 +688,6 @@ class VoiceTranscriptionApp:
             options_frame,
             text="Réduire à la fermeture",
             variable=self.minimize_to_tray_var,
-            font=("Arial", 8),
-            anchor="w"
-        ).pack(anchor=tk.W, fill=tk.X)
-
-        tk.Checkbutton(
-            options_frame,
-            text="Coller pour terminal (Ctrl+Maj+V)",
-            variable=self.terminal_paste_var,
             font=("Arial", 8),
             anchor="w"
         ).pack(anchor=tk.W, fill=tk.X)
@@ -640,6 +825,8 @@ class VoiceTranscriptionApp:
         self._update_api_key_status(ok=(self.client is not None))
         # Forcer la mise à jour du label "durée" pour matcher la valeur persistée
         self._on_duration_change(self.max_recording_duration)
+        # Appliquer l'état visuel initial des toggles de collage (enabled/disabled)
+        self._on_paste_toggles_changed()
 
     def _load_microphones(self):
         """Charge la liste des microphones disponibles (filtrés et dédupliqués)"""
@@ -871,6 +1058,35 @@ class VoiceTranscriptionApp:
                 self.overlay.hide()
         self._save_prefs()
 
+    def _on_overlay_position_saved(self, x, y):
+        """Appelé par l'overlay après un drag utilisateur : persiste la position."""
+        self._save_prefs()
+
+    def _on_paste_toggles_changed(self):
+        """Garantit la cohérence entre auto_paste et terminal_paste :
+        - terminal_paste activé → auto_paste forcé à True
+        - auto_paste désactivé  → terminal_paste forcé à False
+        Met à jour l'état visuel (disabled) des deux cases pour rendre
+        la contrainte lisible à l'utilisateur."""
+        # Invariants
+        if self.terminal_paste_var.get() and not self.auto_paste_var.get():
+            self.auto_paste_var.set(True)
+            return  # la trace auto_paste va re-déclencher la méthode
+        if not self.auto_paste_var.get() and self.terminal_paste_var.get():
+            self.terminal_paste_var.set(False)
+            return
+
+        # État visuel
+        if hasattr(self, 'auto_paste_checkbox') and hasattr(self, 'terminal_paste_checkbox'):
+            auto_paste_on = self.auto_paste_var.get()
+            terminal_on = self.terminal_paste_var.get()
+            # Si terminal est coché, auto_paste est verrouillé à True
+            self.auto_paste_checkbox.config(state='disabled' if terminal_on else 'normal')
+            # Si auto_paste est décoché, terminal_paste est verrouillé à False
+            self.terminal_paste_checkbox.config(state='normal' if auto_paste_on else 'disabled')
+
+        self._save_prefs()
+
     def _quit_app(self):
         """Quitte proprement : sauvegarde, arrêt de la tray, destruction de la fenêtre."""
         try:
@@ -1029,6 +1245,9 @@ class VoiceTranscriptionApp:
                 "overlay_enabled": self.overlay_enabled_var.get() if hasattr(self, 'overlay_enabled_var') else True,
                 "minimize_to_tray_on_close": self.minimize_to_tray_var.get() if hasattr(self, 'minimize_to_tray_var') else True,
                 "terminal_paste": self.terminal_paste_var.get() if hasattr(self, 'terminal_paste_var') else False,
+                "overlay_position": (list(self.overlay.custom_position)
+                                     if hasattr(self, 'overlay') and self.overlay.custom_position
+                                     else None),
             }
             with open(PREFS_FILE, 'w', encoding='utf-8') as f:
                 json.dump(prefs, f, ensure_ascii=False, indent=2)
