@@ -118,7 +118,10 @@ except ImportError:
 
 class ToolTip:
     """Tooltip minimaliste en pur tkinter (pas de dep).
-    Apparaît après 400ms de survol, disparaît sur Leave ou clic."""
+    Apparaît après 400ms de survol, disparaît sur Leave ou clic.
+
+    `text` accepte une chaîne, ou un callable évalué à chaque survol pour un
+    contenu qui dépend de l'état courant."""
 
     def __init__(self, widget, text, wraplength=240, delay_ms=400):
         self.widget = widget
@@ -153,7 +156,7 @@ class ToolTip:
         self.tip_window.attributes('-topmost', True)
         self.tip_window.geometry(f"+{x}+{y}")
         tk.Label(
-            self.tip_window, text=self.text,
+            self.tip_window, text=self.text() if callable(self.text) else self.text,
             background="#ffffe0", relief="solid", borderwidth=1,
             font=("Arial", 8), wraplength=self.wraplength,
             justify="left", padx=6, pady=4,
@@ -874,12 +877,24 @@ class VoiceTranscriptionApp:
         # Statistiques mois en cours
         tk.Frame(options_frame, height=1, bg="#cccccc").pack(fill=tk.X, pady=(8, 6))
 
+        month_header = tk.Frame(options_frame)
+        month_header.pack(anchor=tk.W, fill=tk.X, pady=(0, 2))
+
         tk.Label(
-            options_frame,
+            month_header,
             text="Ce mois:",
-            font=("Arial", 9, "bold"),
-            anchor="w"
-        ).pack(anchor=tk.W, fill=tk.X, pady=(0, 2))
+            font=("Arial", 9, "bold")
+        ).pack(side=tk.LEFT)
+
+        month_help = tk.Label(
+            month_header,
+            text="?",
+            font=("Arial", 8, "bold"),
+            fg="#1565c0",
+            cursor="question_arrow"
+        )
+        month_help.pack(side=tk.LEFT, padx=(4, 0))
+        ToolTip(month_help, self._month_breakdown_text, wraplength=300)
 
         self.month_count_label = tk.Label(
             options_frame,
@@ -898,6 +913,18 @@ class VoiceTranscriptionApp:
             anchor="w"
         )
         self.month_cost_label.pack(anchor=tk.W, fill=tk.X, pady=(0, 5))
+
+        self.clear_history_button = tk.Button(
+            options_frame,
+            text="Effacer l'historique des coûts",
+            font=("Arial", 8),
+            anchor="w",
+            relief=tk.FLAT,
+            fg="#888888",
+            cursor="hand2",
+            command=self._clear_cost_history
+        )
+        self.clear_history_button.pack(anchor=tk.W, fill=tk.X)
 
         # Charger la liste des microphones (après que l'interface soit créée)
         self.root.after(100, self._load_microphones)
@@ -1437,9 +1464,6 @@ class VoiceTranscriptionApp:
             "cost_usd": round(cost_usd, 6),
             "cost_exact": cost_exact,
         }
-        # On relit le fichier avant d'écrire : la copie en mémoire date du démarrage
-        # et écraserait toute modification externe faite depuis (purge, édition).
-        self.history = self._load_history()
         self.history.setdefault("transcriptions", []).append(entry)
         self._save_history()
 
@@ -1458,6 +1482,58 @@ class VoiceTranscriptionApp:
                 count += 1
                 total += entry.get("cost_usd", 0.0)
         return count, total
+
+    def _month_breakdown_text(self):
+        """Détail du mois en cours par modèle, pour la tooltip du '?'."""
+        now = datetime.now()
+        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+        par_modele = {}
+        for entry in self.history.get("transcriptions", []):
+            try:
+                at = datetime.fromisoformat(entry["at"])
+            except (KeyError, ValueError):
+                continue
+            if at < month_start:
+                continue
+            stats = par_modele.setdefault(entry["model"], [0, 0.0, 0.0])
+            stats[0] += 1
+            stats[1] += entry.get("duration_sec", 0.0)
+            stats[2] += entry.get("cost_usd", 0.0)
+
+        if not par_modele:
+            return "Aucune transcription ce mois-ci."
+
+        lignes = [f"Détail depuis le {month_start.strftime('%d/%m')} :", ""]
+        for model, (count, secondes, cout) in sorted(par_modele.items(),
+                                                     key=lambda kv: -kv[1][2]):
+            label = next((l for l, api in MODEL_OPTIONS if api == model), model)
+            label = label.replace(" (recommandé)", "")
+            minutes = secondes / 60
+            lignes.append(f"{label}\n   {count} transcription{'s' if count > 1 else ''}"
+                          f" · {minutes:.1f} min · ${cout:.4f}")
+        return "\n".join(lignes)
+
+    def _clear_cost_history(self):
+        """Vide l'historique des coûts, après confirmation."""
+        count = len(self.history.get("transcriptions", []))
+        if count == 0:
+            messagebox.showinfo("Historique", "L'historique est déjà vide.")
+            return
+
+        if not messagebox.askyesno(
+            "Effacer l'historique",
+            f"Effacer les {count} entrées du suivi des coûts ?\n\n"
+            "Les compteurs de session et du mois repartent de zéro. "
+            "Cette action est irréversible."
+        ):
+            return
+
+        self.history["transcriptions"] = []
+        self._save_history()
+        self.session_cost = 0.0
+        self.session_transcriptions = 0
+        self._update_session_display()
 
     def _update_session_display(self):
         """Met à jour l'affichage des compteurs de session et du mois en cours"""
