@@ -11,6 +11,7 @@ __pycache__/
 
 # Données utilisateur locales (ne jamais commiter sur repo public)
 transcription_history.json
+transcription_history.*.json
 user_preferences.json
 
 # État local de Claude Code (dépend de la session de dev, pas du projet)

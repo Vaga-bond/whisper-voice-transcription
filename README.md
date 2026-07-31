@@ -20,10 +20,22 @@ La croix de la fenêtre réduit dans la barre système (configurable). Clic droi
 ## Fonctionnalités
 
 ### Transcription
-- Trois modèles au choix, persistés entre sessions :
-  - **GPT-4o Mini Transcribe** (défaut, ≈ 0,003 $/min)
-  - **GPT-4o Transcribe** (≈ 0,006 $/min)
-  - **Whisper-1** (≈ 0,006 $/min)
+- Quatre modèles au choix, persistés entre sessions :
+
+  | Modèle | Facturation | Coût par minute |
+  |---|---|---|
+  | **GPT Transcribe** (défaut) | durée | 0,0045 $ ferme |
+  | **GPT-4o Transcribe** | tokens (2,50 $ / 10,00 $ par 1M) | ≈ 0,0033 $ |
+  | **GPT-4o Mini Transcribe** | tokens (1,25 $ / 5,00 $ par 1M) | ≈ 0,0016 $ |
+  | **Whisper-1** (ancienne génération) | durée | 0,006 $ ferme |
+
+  Les coûts par minute des modèles GPT-4o sont mesurés sur une minute de dictée
+  française continue (≈ 600 tokens audio en entrée + ≈ 180 tokens de texte en sortie) ;
+  ils varient avec la densité de parole. GPT Transcribe est plus cher que GPT-4o Mini
+  mais moins cher que Whisper-1, en échange de la meilleure précision de la gamme.
+- Les modèles `gpt-live-transcribe` et `gpt-realtime-whisper` ne sont pas proposés : ils
+  n'existent que sur les sessions Realtime WebSocket et renvoient 404 sur
+  `v1/audio/transcriptions`, l'endpoint fichier utilisé ici.
 - Capture audio en continu via `sounddevice.InputStream` avec callback (pas de gap entre échantillons)
 - Durée maximum configurable de 5 secondes à 15 minutes
 - Annulation à tout moment avant la requête API → zéro facturation
@@ -44,8 +56,12 @@ La croix de la fenêtre réduit dans la barre système (configurable). Clic droi
 ### Suivi des coûts
 - Session courante (compteur + total en USD)
 - Mois en cours (compteur + total en USD)
-- Historique complet dans `transcription_history.json` (date, modèle, durée audio, coût estimé)
-- Calcul local basé sur la durée audio × tarif OpenAI du modèle utilisé
+- Historique complet dans `transcription_history.json` (date, modèle, durée audio, coût)
+- Coût **réel** et non estimé : chaque réponse de l'API contient un champ `usage` qui donne
+  soit les secondes facturées (`type: "duration"`), soit les tokens consommés
+  (`type: "tokens"`). Le montant est calculé à partir de ce champ ; l'estimation par minute
+  ne sert que de repli si `usage` est absent. Le drapeau `cost_exact` de chaque entrée
+  d'historique indique lequel des deux a été utilisé.
 
 ### Autres
 - Sélection du microphone avec filtrage des périphériques virtuels, persistance par nom (stable après re-branchement USB)

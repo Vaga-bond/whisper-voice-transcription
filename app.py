@@ -27,18 +27,64 @@ import pyautogui
 load_dotenv()
 
 # Modèles de transcription disponibles : (libellé UI, identifiant API)
+# Restreint aux modèles compatibles v1/audio/transcriptions (upload de fichier).
+# gpt-live-transcribe et gpt-realtime-whisper en sont exclus : ils ne répondent
+# que sur les sessions Realtime WebSocket (404 sur l'endpoint fichier).
 MODEL_OPTIONS = [
-    ("GPT-4o Mini (recommandé)", "gpt-4o-mini-transcribe"),
-    ("GPT-4o", "gpt-4o-transcribe"),
+    ("GPT Transcribe (recommandé)", "gpt-transcribe"),
+    ("GPT-4o Transcribe", "gpt-4o-transcribe"),
+    ("GPT-4o Mini Transcribe", "gpt-4o-mini-transcribe"),
     ("Whisper-1", "whisper-1"),
 ]
 
-# Tarifs OpenAI en USD par seconde d'audio
-MODEL_PRICING_PER_SECOND = {
-    "whisper-1": 0.006 / 60,
-    "gpt-4o-transcribe": 0.006 / 60,
-    "gpt-4o-mini-transcribe": 0.003 / 60,
+# Tarification OpenAI. Deux modes de facturation coexistent selon le modèle :
+#   "duration" → prix ferme par minute d'audio
+#   "tokens"   → prix par million de tokens (audio en entrée, texte en sortie)
+# L'API renvoie le détail exact dans le champ `usage` de la réponse, utilisé en
+# priorité par compute_transcription_cost(). `est_per_minute` ne sert que de repli
+# si `usage` est absent ; il vient d'une mesure sur une minute de dictée française.
+MODEL_PRICING = {
+    "gpt-transcribe": {
+        "mode": "duration", "per_minute": 0.0045, "est_per_minute": 0.0045,
+    },
+    "gpt-4o-transcribe": {
+        "mode": "tokens", "input_per_1m": 2.50, "output_per_1m": 10.00,
+        "est_per_minute": 0.0033,
+    },
+    "gpt-4o-mini-transcribe": {
+        "mode": "tokens", "input_per_1m": 1.25, "output_per_1m": 5.00,
+        "est_per_minute": 0.0016,
+    },
+    "whisper-1": {
+        "mode": "duration", "per_minute": 0.006, "est_per_minute": 0.006,
+    },
 }
+
+
+def compute_transcription_cost(model, usage, duration_sec):
+    """Coût USD d'une transcription, calculé depuis le `usage` renvoyé par l'API.
+
+    Retourne (coût, exact) où `exact` indique si le montant vient de la
+    facturation réelle plutôt que de l'estimation par minute.
+    """
+    pricing = MODEL_PRICING.get(model)
+    if pricing is None:
+        return 0.0, False
+
+    # L'API facture soit une durée arrondie, soit des tokens : les deux formes
+    # sont renvoyées dans `usage`, avec un champ `type` qui indique laquelle.
+    usage_type = getattr(usage, "type", None)
+    try:
+        if usage_type == "duration":
+            return usage.seconds / 60 * pricing["per_minute"], True
+        if usage_type == "tokens":
+            cost = (usage.input_tokens / 1_000_000 * pricing["input_per_1m"]
+                    + usage.output_tokens / 1_000_000 * pricing["output_per_1m"])
+            return cost, True
+    except (AttributeError, TypeError, KeyError):
+        pass
+
+    return duration_sec / 60 * pricing["est_per_minute"], False
 
 # Fichier d'historique persistant (à côté du script)
 HISTORY_FILE = Path(__file__).parent / "transcription_history.json"
@@ -47,7 +93,7 @@ HISTORY_FILE = Path(__file__).parent / "transcription_history.json"
 PREFS_FILE = Path(__file__).parent / "user_preferences.json"
 
 DEFAULT_PREFS = {
-    "selected_model": "gpt-4o-mini-transcribe",
+    "selected_model": "gpt-transcribe",
     "selected_device_name": None,   # Nom du micro (pas l'index — plus stable entre sessions)
     "max_recording_duration": 240,
     "auto_copy": True,    # Laisser le texte dans le presse-papier après transcription
@@ -450,10 +496,10 @@ class VoiceTranscriptionApp:
         self.prefs = self._load_prefs()
 
         # Modèle de transcription sélectionné (via prefs)
-        self.selected_model = self.prefs.get("selected_model", "gpt-4o-mini-transcribe")
+        self.selected_model = self.prefs.get("selected_model", DEFAULT_PREFS["selected_model"])
         # Sécurité : si le fichier de prefs contient un modèle inconnu, retomber sur le défaut
-        if self.selected_model not in MODEL_PRICING_PER_SECOND:
-            self.selected_model = "gpt-4o-mini-transcribe"
+        if self.selected_model not in MODEL_PRICING:
+            self.selected_model = DEFAULT_PREFS["selected_model"]
 
         # Nom du micro préféré (appliqué par _load_microphones si toujours présent)
         self.preferred_mic_name = self.prefs.get("selected_device_name")
@@ -691,6 +737,18 @@ class VoiceTranscriptionApp:
                 label=label,
                 command=lambda l=label, n=api_name: self._change_model(l, n)
             )
+
+        ToolTip(
+            self.model_dropdown,
+            "Coût par minute d'audio :\n\n"
+            "• GPT Transcribe — 0,0045 $ ferme (précision la plus haute)\n"
+            "• GPT-4o Transcribe — ≈ 0,0033 $ aux tokens\n"
+            "• GPT-4o Mini Transcribe — ≈ 0,0016 $ aux tokens\n"
+            "• Whisper-1 — 0,006 $ ferme (ancienne génération)\n\n"
+            "Les modèles aux tokens varient selon la densité de parole ; "
+            "le compteur ci-dessous utilise le coût réel renvoyé par l'API.",
+            wraplength=280
+        )
 
         # Curseur pour la durée maximum (horizontal)
         tk.Label(
@@ -1367,13 +1425,14 @@ class VoiceTranscriptionApp:
         except Exception as e:
             print(f"⚠️ Erreur sauvegarde historique: {e}")
 
-    def _log_transcription(self, model, duration_sec, cost_usd):
+    def _log_transcription(self, model, duration_sec, cost_usd, cost_exact=True):
         """Enregistre une transcription dans l'historique persistant"""
         entry = {
             "at": datetime.now().isoformat(timespec='seconds'),
             "model": model,
             "duration_sec": round(duration_sec, 2),
             "cost_usd": round(cost_usd, 6),
+            "cost_exact": cost_exact,
         }
         self.history.setdefault("transcriptions", []).append(entry)
         self._save_history()
@@ -1675,11 +1734,12 @@ class VoiceTranscriptionApp:
             # dont la taille de bloc est variable) : bytes / 2 (int16) / taux = secondes.
             total_bytes = sum(len(f) for f in self.audio_frames)
             audio_duration_seconds = total_bytes / 2 / self.RATE
-            rate = MODEL_PRICING_PER_SECOND.get(model_used, 0)
-            cost = audio_duration_seconds * rate
+            cost, exact = compute_transcription_cost(
+                model_used, getattr(transcript, "usage", None), audio_duration_seconds
+            )
             self.session_cost += cost
             self.session_transcriptions += 1
-            self._log_transcription(model_used, audio_duration_seconds, cost)
+            self._log_transcription(model_used, audio_duration_seconds, cost, exact)
             self.root.after(0, self._update_session_display)
 
             # Afficher le texte dans l'interface
