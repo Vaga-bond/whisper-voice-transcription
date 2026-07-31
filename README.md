@@ -55,7 +55,9 @@ La croix de la fenêtre réduit dans la barre système (configurable). Clic droi
 
 ### Suivi des coûts
 - Session courante (compteur + total en USD)
-- Mois en cours (compteur + total en USD)
+- Mois en cours (compteur + total en USD), avec un **`?`** qui détaille au survol le nombre
+  de transcriptions, les minutes d'audio et le coût **par modèle**
+- Bouton **Effacer l'historique des coûts** (avec confirmation) pour repartir de zéro
 - Historique complet dans `transcription_history.json` (date, modèle, durée audio, coût)
 - Coût **réel** et non estimé : chaque réponse de l'API contient un champ `usage` qui donne
   soit les secondes facturées (`type: "duration"`), soit les tokens consommés
