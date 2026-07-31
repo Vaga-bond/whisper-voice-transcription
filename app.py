@@ -1239,9 +1239,12 @@ class VoiceTranscriptionApp:
         self._save_prefs()
 
     def _quit_app(self):
-        """Quitte proprement : sauvegarde, arrêt de la tray, destruction de la fenêtre."""
+        """Quitte proprement : sauvegarde, arrêt de la tray, destruction de la fenêtre.
+
+        L'historique n'est pas réécrit ici : il est déjà sauvé à chaque transcription,
+        et redumper la copie mémoire écraserait toute modification externe du fichier.
+        """
         try:
-            self._save_history()
             self._save_prefs()
         except Exception as e:
             print(f"⚠️ Erreur sauvegarde à la fermeture: {e}")
@@ -1434,6 +1437,9 @@ class VoiceTranscriptionApp:
             "cost_usd": round(cost_usd, 6),
             "cost_exact": cost_exact,
         }
+        # On relit le fichier avant d'écrire : la copie en mémoire date du démarrage
+        # et écraserait toute modification externe faite depuis (purge, édition).
+        self.history = self._load_history()
         self.history.setdefault("transcriptions", []).append(entry)
         self._save_history()
 
