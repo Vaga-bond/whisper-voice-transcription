@@ -7,6 +7,8 @@ Interface Tkinter native Windows
 import tkinter as tk
 from tkinter import scrolledtext, messagebox
 import threading
+import socket
+import sys
 import os
 import json
 import tempfile
@@ -23,13 +25,17 @@ from pynput import keyboard as pynput_keyboard
 import pygame
 import pyautogui
 
+# Sans ça, les emojis des prints crashent une console Windows en cp1252.
+for flux in (sys.stdout, sys.stderr):
+    if flux is not None:
+        flux.reconfigure(encoding='utf-8', errors='replace')
+
 # Charger les variables d'environnement
 load_dotenv()
 
-# Modèles de transcription disponibles : (libellé UI, identifiant API)
-# Restreint aux modèles compatibles v1/audio/transcriptions (upload de fichier).
-# gpt-live-transcribe et gpt-realtime-whisper en sont exclus : ils ne répondent
-# que sur les sessions Realtime WebSocket (404 sur l'endpoint fichier).
+# Modèles compatibles v1/audio/transcriptions : (libellé UI, identifiant API).
+# gpt-live-transcribe et gpt-realtime-whisper sont exclus, ils ne répondent que
+# sur les sessions Realtime WebSocket.
 MODEL_OPTIONS = [
     ("GPT Transcribe (recommandé)", "gpt-transcribe"),
     ("GPT-4o Transcribe", "gpt-4o-transcribe"),
@@ -37,12 +43,8 @@ MODEL_OPTIONS = [
     ("Whisper-1", "whisper-1"),
 ]
 
-# Tarification OpenAI. Deux modes de facturation coexistent selon le modèle :
-#   "duration" → prix ferme par minute d'audio
-#   "tokens"   → prix par million de tokens (audio en entrée, texte en sortie)
-# L'API renvoie le détail exact dans le champ `usage` de la réponse, utilisé en
-# priorité par compute_transcription_cost(). `est_per_minute` ne sert que de repli
-# si `usage` est absent ; il vient d'une mesure sur une minute de dictée française.
+# Tarifs OpenAI. "duration" = prix ferme par minute, "tokens" = prix par million
+# de tokens. `est_per_minute` ne sert que de repli si l'API ne renvoie pas `usage`.
 MODEL_PRICING = {
     "gpt-transcribe": {
         "mode": "duration", "per_minute": 0.0045, "est_per_minute": 0.0045,
@@ -62,17 +64,11 @@ MODEL_PRICING = {
 
 
 def compute_transcription_cost(model, usage, duration_sec):
-    """Coût USD d'une transcription, calculé depuis le `usage` renvoyé par l'API.
-
-    Retourne (coût, exact) où `exact` indique si le montant vient de la
-    facturation réelle plutôt que de l'estimation par minute.
-    """
+    """Retourne (coût USD, exact) d'après le `usage` renvoyé par l'API."""
     pricing = MODEL_PRICING.get(model)
     if pricing is None:
         return 0.0, False
 
-    # L'API facture soit une durée arrondie, soit des tokens : les deux formes
-    # sont renvoyées dans `usage`, avec un champ `type` qui indique laquelle.
     usage_type = getattr(usage, "type", None)
     try:
         if usage_type == "duration":
@@ -106,6 +102,9 @@ DEFAULT_PREFS = {
 }
 
 ENV_FILE = Path(__file__).parent / ".env"
+
+# Port local réservé par l'instance en cours (voir acquire_single_instance_lock).
+SINGLE_INSTANCE_PORT = 49731
 
 # pystray + Pillow sont optionnels : l'app démarre aussi sans, la tray est juste désactivée.
 try:
@@ -1268,8 +1267,7 @@ class VoiceTranscriptionApp:
     def _quit_app(self):
         """Quitte proprement : sauvegarde, arrêt de la tray, destruction de la fenêtre.
 
-        L'historique n'est pas réécrit ici : il est déjà sauvé à chaque transcription,
-        et redumper la copie mémoire écraserait toute modification externe du fichier.
+        L'historique n'est pas réécrit ici, il est déjà sauvé à chaque transcription.
         """
         try:
             self._save_prefs()
@@ -2044,9 +2042,47 @@ class VoiceTranscriptionApp:
             print("💡 Essayez de lancer l'application en tant qu'administrateur")
     
 
+def acquire_single_instance_lock():
+    """Retourne le socket verrou, ou None si l'app tourne déjà (et la ramène au premier plan)."""
+    lock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        # Pas de SO_REUSEADDR : on veut que le second bind échoue.
+        lock.bind(("127.0.0.1", SINGLE_INSTANCE_PORT))
+        lock.listen(1)
+        return lock
+    except OSError:
+        lock.close()
+        try:
+            with socket.create_connection(("127.0.0.1", SINGLE_INSTANCE_PORT), timeout=2):
+                pass
+        except OSError:
+            pass
+        return None
+
+
+def serve_single_instance_lock(lock, app):
+    """Ré-affiche la fenêtre quand un second lancement se signale."""
+    def boucle():
+        while True:
+            try:
+                conn, _ = lock.accept()
+                conn.close()
+            except OSError:
+                return
+            app.root.after(0, app._restore_window)
+
+    threading.Thread(target=boucle, daemon=True).start()
+
+
 def main():
+    lock = acquire_single_instance_lock()
+    if lock is None:
+        print("ℹ️ Application déjà lancée : fenêtre existante ramenée au premier plan.")
+        return
+
     root = tk.Tk()
     app = VoiceTranscriptionApp(root)
+    serve_single_instance_lock(lock, app)
 
     # Le X de la fenêtre réduit dans la tray (si disponible), sinon quitte.
     # Pour réellement quitter, utiliser le menu clic-droit de la tray.
