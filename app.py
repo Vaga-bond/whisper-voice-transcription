@@ -88,6 +88,87 @@ HISTORY_FILE = Path(__file__).parent / "transcription_history.json"
 # Fichier de préférences utilisateur (micro, modèle, toggles, durée)
 PREFS_FILE = Path(__file__).parent / "user_preferences.json"
 
+# --- Raccourci global : modificateurs, libellés de touches, sérialisation -----
+
+def _build_modifier_map():
+    """Associe chaque variante de modificateur pynput à un nom canonique.
+
+    pynput expose plusieurs objets pour un même modificateur (ctrl_l, ctrl_r…) et
+    tous n'existent pas sur toutes les plateformes, d'où le getattr défensif.
+    """
+    variants = {
+        'ctrl': ('ctrl', 'ctrl_l', 'ctrl_r'),
+        'alt': ('alt', 'alt_l', 'alt_r', 'alt_gr'),
+        'shift': ('shift', 'shift_l', 'shift_r'),
+        'win': ('cmd', 'cmd_l', 'cmd_r'),
+    }
+    mapping = {}
+    for canonical, attrs in variants.items():
+        for attr in attrs:
+            key = getattr(pynput_keyboard.Key, attr, None)
+            if key is not None:
+                mapping[key] = canonical
+    return mapping
+
+
+MODIFIER_NAMES = _build_modifier_map()
+MODIFIER_ORDER = ('ctrl', 'alt', 'shift', 'win')
+MODIFIER_LABELS = {'ctrl': 'Ctrl', 'alt': 'Alt', 'shift': 'Maj', 'win': 'Win'}
+
+# Libellés des codes de touche virtuels Windows (VK). On raisonne en VK plutôt
+# qu'en caractère : le VK désigne la touche physique, donc le raccourci reste le
+# même quelle que soit la disposition du clavier (AZERTY, QWERTY…).
+VK_LABELS = {
+    8: 'Retour arrière', 9: 'Tab', 13: 'Entrée', 19: 'Pause', 20: 'Verr. Maj',
+    27: 'Échap', 32: 'Espace', 33: 'Page préc.', 34: 'Page suiv.', 35: 'Fin',
+    36: 'Origine', 37: '←', 38: '↑', 39: '→', 40: '↓', 44: 'Impr. écran',
+    45: 'Inser', 46: 'Suppr',
+    106: 'Pavé num *', 107: 'Pavé num +', 109: 'Pavé num -',
+    110: 'Pavé num .', 111: 'Pavé num /',
+}
+VK_LABELS.update({vk: chr(vk) for vk in range(48, 58)})                 # 0-9
+VK_LABELS.update({vk: chr(vk) for vk in range(65, 91)})                 # A-Z
+VK_LABELS.update({vk: 'Pavé num %d' % (vk - 96) for vk in range(96, 106)})
+VK_LABELS.update({vk: 'F%d' % (vk - 111) for vk in range(112, 136)})
+
+# Touches jamais utilisées pour saisir du texte : les seules qu'on accepte sans
+# modificateur sans avertir l'utilisateur.
+SAFE_BARE_VKS = set(range(112, 136))                                    # F1-F24
+
+DEFAULT_HOTKEY = {
+    'modifiers': ['ctrl', 'alt'],
+    # 9 de la rangée du haut (VK 57) et du pavé numérique (VK 105) : selon le
+    # matériel et le logiciel de macro, l'un ou l'autre est émis.
+    'vks': [57, 105],
+}
+
+
+def describe_hotkey(hotkey):
+    """Rend un raccourci lisible : {'modifiers': ['ctrl','alt'], 'vks': [57]} -> 'Ctrl+Alt+9'."""
+    parts = [MODIFIER_LABELS[m] for m in MODIFIER_ORDER if m in hotkey['modifiers']]
+    vks = hotkey['vks']
+    parts.append(VK_LABELS.get(vks[0], 'VK %d' % vks[0]) if vks else '?')
+    return '+'.join(parts)
+
+
+def normalize_hotkey(value):
+    """Valide un raccourci lu depuis les préférences, sinon retourne le défaut.
+
+    Les préférences sont un fichier JSON éditable à la main : on ne fait jamais
+    confiance à son contenu, un raccourci invalide ne doit pas empêcher l'app de
+    démarrer.
+    """
+    try:
+        modifiers = [m for m in MODIFIER_ORDER if m in value['modifiers']]
+        vks = [int(v) for v in value['vks'] if 0 < int(v) < 256]
+        if vks:
+            return {'modifiers': modifiers, 'vks': vks}
+    except (KeyError, TypeError, ValueError):
+        pass
+    return {'modifiers': list(DEFAULT_HOTKEY['modifiers']),
+            'vks': list(DEFAULT_HOTKEY['vks'])}
+
+
 DEFAULT_PREFS = {
     "selected_model": "gpt-transcribe",
     "selected_device_name": None,   # Nom du micro (pas l'index — plus stable entre sessions)
@@ -99,9 +180,26 @@ DEFAULT_PREFS = {
     "minimize_to_tray_on_close": True,       # La croix réduit dans la tray au lieu de quitter
     "terminal_paste": False,                 # Coller avec Ctrl+Shift+V (compatible terminaux)
     "overlay_position": None,                # [x, y] de l'overlay après drag utilisateur
+    "hotkey": DEFAULT_HOTKEY,                # Raccourci global (voir normalize_hotkey)
 }
 
 ENV_FILE = Path(__file__).parent / ".env"
+
+# Valeurs d'exemple de .env.example. `setup.bat` copie ce fichier vers .env, donc
+# OPENAI_API_KEY est défini dès l'installation alors qu'aucune clé n'est saisie :
+# sans ce filtre l'app annoncerait « clé configurée » puis échouerait en 401 à la
+# première dictée.
+API_KEY_PLACEHOLDERS = {
+    "votre_cle_api_ici", "your_api_key_here", "sk-xxx", "sk-...",
+}
+
+
+def read_api_key():
+    """Retourne la clé API si elle est réellement renseignée, sinon None."""
+    key = (os.getenv('OPENAI_API_KEY') or '').strip()
+    if not key or key in API_KEY_PLACEHOLDERS:
+        return None
+    return key
 
 # Port local réservé par l'instance en cours (voir acquire_single_instance_lock).
 SINGLE_INSTANCE_PORT = 49731
@@ -530,6 +628,11 @@ class VoiceTranscriptionApp:
         # Durée maximum d'enregistrement (via prefs)
         self.max_recording_duration = int(self.prefs.get("max_recording_duration", 240))
 
+        # Raccourci global, validé au chargement. `_hotkey_capture` vaut None sauf
+        # pendant que la fenêtre de capture est ouverte (voir _open_hotkey_dialog).
+        self.hotkey = normalize_hotkey(self.prefs.get("hotkey"))
+        self._hotkey_capture = None
+
         # Nom du micro affiché avant que _load_microphones ne remplisse la liste
         self.microphone_name = "Chargement..."
 
@@ -552,7 +655,7 @@ class VoiceTranscriptionApp:
         # renseigner via l'UI). Le bouton d'enregistrement affichera un message
         # d'erreur clair si on tente d'enregistrer sans clé.
         self.client = None
-        api_key = os.getenv('OPENAI_API_KEY')
+        api_key = read_api_key()
         if api_key:
             try:
                 self.client = OpenAI(api_key=api_key)
@@ -644,7 +747,7 @@ class VoiceTranscriptionApp:
         # Affichage du raccourci clavier (sous les boutons)
         self.hotkey_label = tk.Label(
             main_frame,
-            text="⌨️ Ctrl+Alt+9 (global) — Échap pour annuler",
+            text=self._hotkey_banner(),
             font=("Arial", 9),
             fg="blue"
         )
@@ -681,6 +784,32 @@ class VoiceTranscriptionApp:
             text="Modifier la clé…",
             font=("Arial", 8),
             command=self._open_api_key_dialog,
+            anchor="w"
+        ).pack(anchor=tk.W, pady=(2, 5))
+
+        tk.Frame(options_frame, height=1, bg="#cccccc").pack(fill=tk.X, pady=(4, 8))
+
+        # Raccourci global
+        tk.Label(
+            options_frame,
+            text="Raccourci:",
+            font=("Arial", 9, "bold"),
+            anchor="w"
+        ).pack(anchor=tk.W, fill=tk.X, pady=(0, 2))
+
+        self.hotkey_pref_label = tk.Label(
+            options_frame,
+            text=describe_hotkey(self.hotkey),
+            font=("Arial", 8),
+            anchor="w"
+        )
+        self.hotkey_pref_label.pack(anchor=tk.W, fill=tk.X)
+
+        tk.Button(
+            options_frame,
+            text="Modifier le raccourci…",
+            font=("Arial", 8),
+            command=self._open_hotkey_dialog,
             anchor="w"
         ).pack(anchor=tk.W, pady=(2, 5))
 
@@ -1427,6 +1556,7 @@ class VoiceTranscriptionApp:
                 "overlay_position": (list(self.overlay.custom_position)
                                      if hasattr(self, 'overlay') and self.overlay.custom_position
                                      else None),
+                "hotkey": self.hotkey,
             }
             with open(PREFS_FILE, 'w', encoding='utf-8') as f:
                 json.dump(prefs, f, ensure_ascii=False, indent=2)
@@ -1985,47 +2115,88 @@ class VoiceTranscriptionApp:
         else:
             messagebox.showinfo("Info", "Aucun texte à copier")
     
-    def setup_global_hotkey(self):
-        """Configure Ctrl+Alt+9 (toggle enregistrement) + Échap (annulation).
+    def _hotkey_banner(self):
+        """Texte du bandeau sous les boutons, reflétant le raccourci courant."""
+        return "⌨️ %s (global) — Échap pour annuler" % describe_hotkey(self.hotkey)
 
-        On utilise un `Listener` avec suivi manuel des modificateurs plutôt que
-        `GlobalHotKeys`, parce que certains logiciels de souris (Logitech G Hub,
-        Razer Synapse, etc.) envoient les keystrokes synthétiques avec un timing
-        ou un ordre que `GlobalHotKeys` ne reconnaît pas toujours. Le suivi
-        manuel accepte n'importe quel ordre de pression et fonctionne avec les
-        raccourcis souris.
+    def _apply_hotkey(self, hotkey):
+        """Enregistre un nouveau raccourci et rafraîchit les affichages.
+
+        Le listener relit `self.hotkey` à chaque frappe : aucun redémarrage du
+        thread clavier n'est nécessaire.
         """
-        modifiers = {'ctrl': False, 'alt': False}
+        self.hotkey = hotkey
+        self._save_prefs()
+        if hasattr(self, 'hotkey_label'):
+            self.hotkey_label.config(text=self._hotkey_banner())
+        if hasattr(self, 'hotkey_pref_label'):
+            self.hotkey_pref_label.config(text=describe_hotkey(hotkey))
 
-        def is_key_9(key):
-            """Reconnaît le 9 alphanumérique (VK=57) comme le pavé numérique (VK_NUMPAD9=105)."""
-            vk = getattr(key, 'vk', None)
-            if vk in (57, 105):
-                return True
-            if hasattr(key, 'char') and key.char == '9':
-                return True
+    def _hotkey_matches(self, vk, held):
+        """Le raccourci courant est-il déclenché par `vk` avec les modificateurs `held` ?
+
+        Quand le raccourci comporte des modificateurs, on exige qu'ils soient tous
+        enfoncés sans interdire les autres : certains logiciels de macro ajoutent
+        Maj à la combinaison qu'ils émettent. Un raccourci sans modificateur n'est
+        en revanche accepté que si aucun modificateur n'est enfoncé, sinon il
+        capterait toutes les combinaisons bâties sur cette touche.
+        """
+        if vk not in self.hotkey['vks']:
             return False
+        required = set(self.hotkey['modifiers'])
+        return required <= held if required else not held
+
+    def setup_global_hotkey(self):
+        """Écoute le clavier globalement : raccourci d'enregistrement + Échap.
+
+        On suit les modificateurs à la main plutôt que d'utiliser `GlobalHotKeys`,
+        sensible à l'ordre et au rythme d'arrivée des touches : les frappes émises
+        par un logiciel de macro (souris programmable, pédale, StreamDeck) arrivent
+        parfois en quelques millisecondes et peuvent le prendre à défaut. Le suivi
+        manuel accepte n'importe quel ordre de pression.
+
+        L'écoute se fait au niveau du système, donc l'origine matérielle de la
+        frappe est indifférente : une touche tapée au doigt et une touche émise
+        par une macro produisent le même événement.
+        """
+        held = set()
 
         def on_press(key):
             try:
-                if key in (pynput_keyboard.Key.ctrl_l, pynput_keyboard.Key.ctrl_r):
-                    modifiers['ctrl'] = True
-                elif key in (pynput_keyboard.Key.alt_l, pynput_keyboard.Key.alt_r, pynput_keyboard.Key.alt_gr):
-                    modifiers['alt'] = True
-                elif key == pynput_keyboard.Key.esc:
+                modifier = MODIFIER_NAMES.get(key)
+                if modifier:
+                    held.add(modifier)
+                    if self._hotkey_capture is not None:
+                        self.root.after(0, self._on_capture_modifiers, frozenset(held))
+                    return
+
+                # Fenêtre de capture ouverte : toute touche lui est destinée, ce
+                # qui neutralise au passage le raccourci courant pendant l'essai.
+                if self._hotkey_capture is not None:
+                    if key == pynput_keyboard.Key.esc:
+                        self.root.after(0, self._close_hotkey_dialog)
+                    else:
+                        vk = getattr(key, 'vk', None)
+                        if vk is not None:
+                            self.root.after(0, self._on_capture_key, frozenset(held), vk)
+                    return
+
+                if key == pynput_keyboard.Key.esc:
                     if self.is_recording:
                         self.root.after(0, self.cancel_recording)
-                elif is_key_9(key) and modifiers['ctrl'] and modifiers['alt']:
+                    return
+
+                vk = getattr(key, 'vk', None)
+                if vk is not None and self._hotkey_matches(vk, held):
                     self.root.after(0, self.toggle_recording)
             except Exception:
                 pass
 
         def on_release(key):
             try:
-                if key in (pynput_keyboard.Key.ctrl_l, pynput_keyboard.Key.ctrl_r):
-                    modifiers['ctrl'] = False
-                elif key in (pynput_keyboard.Key.alt_l, pynput_keyboard.Key.alt_r, pynput_keyboard.Key.alt_gr):
-                    modifiers['alt'] = False
+                modifier = MODIFIER_NAMES.get(key)
+                if modifier:
+                    held.discard(modifier)
             except Exception:
                 pass
 
@@ -2036,11 +2207,130 @@ class VoiceTranscriptionApp:
 
             self.hotkey_thread = threading.Thread(target=start_listener, daemon=True)
             self.hotkey_thread.start()
-            print("✅ Raccourci Ctrl+Alt+9 configuré")
+            print(f"✅ Raccourci {describe_hotkey(self.hotkey)} configuré")
         except Exception as e:
             print(f"⚠️ Impossible de configurer le raccourci: {e}")
             print("💡 Essayez de lancer l'application en tant qu'administrateur")
-    
+
+    def _open_hotkey_dialog(self):
+        """Capture une nouvelle combinaison au clavier.
+
+        Les modificateurs ne valident jamais : ils s'accumulent et alimentent
+        l'aperçu. C'est la première touche normale qui fige la combinaison, avec
+        les modificateurs enfoncés à cet instant — l'ordre de pression est donc
+        sans importance.
+        """
+        if self._hotkey_capture is not None:
+            return
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Modifier le raccourci")
+        dialog.geometry("440x260")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+        dialog.protocol("WM_DELETE_WINDOW", self._close_hotkey_dialog)
+
+        tk.Label(
+            dialog,
+            text="Appuyez sur la combinaison souhaitée",
+            font=("Arial", 10, "bold")
+        ).pack(pady=(14, 2))
+
+        tk.Label(
+            dialog,
+            text="Maintenez Ctrl, Alt, Maj ou Win, puis appuyez sur la touche finale.",
+            font=("Arial", 8),
+            fg="gray"
+        ).pack()
+
+        preview = tk.Label(dialog, text="…", font=("Arial", 14, "bold"), fg="#1565c0")
+        preview.pack(pady=10)
+
+        warning = tk.Label(dialog, text="", font=("Arial", 8), fg="#e65100", wraplength=400)
+        warning.pack()
+
+        buttons = tk.Frame(dialog)
+        buttons.pack(pady=12)
+
+        validate = tk.Button(
+            buttons, text="Valider", width=12, state=tk.DISABLED,
+            command=self._confirm_hotkey
+        )
+        validate.pack(side=tk.LEFT, padx=4)
+
+        tk.Button(
+            buttons, text="Annuler", width=12, command=self._close_hotkey_dialog
+        ).pack(side=tk.LEFT, padx=4)
+
+        tk.Button(
+            dialog,
+            text="Rétablir %s" % describe_hotkey(DEFAULT_HOTKEY),
+            font=("Arial", 8),
+            relief=tk.FLAT,
+            fg="#1565c0",
+            command=self._reset_hotkey
+        ).pack()
+
+        self._hotkey_capture = {
+            'dialog': dialog,
+            'preview': preview,
+            'warning': warning,
+            'validate': validate,
+            'pending': None,
+        }
+
+    def _on_capture_modifiers(self, held):
+        """Aperçu vivant tant que l'utilisateur n'a pas figé la combinaison."""
+        capture = self._hotkey_capture
+        if capture is None or capture['pending'] is not None:
+            return
+        parts = [MODIFIER_LABELS[m] for m in MODIFIER_ORDER if m in held]
+        capture['preview'].config(text='+'.join(parts + ['…']) if parts else '…')
+
+    def _on_capture_key(self, held, vk):
+        """Fige la combinaison sur la première touche non-modificateur."""
+        capture = self._hotkey_capture
+        if capture is None:
+            return
+        hotkey = {'modifiers': [m for m in MODIFIER_ORDER if m in held], 'vks': [vk]}
+        capture['pending'] = hotkey
+        capture['preview'].config(text=describe_hotkey(hotkey))
+        if hotkey['modifiers'] or vk in SAFE_BARE_VKS:
+            capture['warning'].config(text="")
+        else:
+            capture['warning'].config(
+                text="Cette touche seule se déclenchera aussi pendant que vous "
+                     "tapez du texte. Ajoutez Ctrl ou Alt pour l'éviter."
+            )
+        capture['validate'].config(state=tk.NORMAL)
+
+    def _confirm_hotkey(self):
+        """Applique la combinaison capturée."""
+        capture = self._hotkey_capture
+        if capture is None or capture['pending'] is None:
+            return
+        hotkey = capture['pending']
+        self._close_hotkey_dialog()
+        self._apply_hotkey(hotkey)
+
+    def _reset_hotkey(self):
+        """Rétablit le raccourci d'origine."""
+        self._close_hotkey_dialog()
+        self._apply_hotkey(normalize_hotkey(DEFAULT_HOTKEY))
+
+    def _close_hotkey_dialog(self):
+        """Ferme la fenêtre de capture et réactive le raccourci global."""
+        capture = self._hotkey_capture
+        if capture is None:
+            return
+        self._hotkey_capture = None
+        try:
+            capture['dialog'].grab_release()
+            capture['dialog'].destroy()
+        except Exception:
+            pass
+
 
 def acquire_single_instance_lock():
     """Retourne le socket verrou, ou None si l'app tourne déjà (et la ramène au premier plan)."""
