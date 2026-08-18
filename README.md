@@ -15,6 +15,10 @@ Prérequis : **Python 3.10 ou plus récent**, installé avec l'option « Add Pyt
 - **Échap** pendant l'enregistrement : annule, aucun appel API, aucun coût
 - **Ctrl+Z** dans la fenêtre : restaure le texte effacé
 
+Une fois la transcription terminée, le texte est collé dans le champ actif et/ou copié dans le presse-papier selon les deux toggles indépendants (voir Options).
+
+La croix de la fenêtre réduit dans la barre système (configurable). Clic droit sur l'icône rouge → **Afficher** ou **Quitter**.
+
 ### Changer le raccourci
 
 Panneau d'options → **« Modifier le raccourci… »**, puis appuyez sur la combinaison voulue : maintenez **Ctrl, Alt, Maj ou Win** (une ou plusieurs) et appuyez sur la touche finale. L'ordre de pression n'a pas d'importance, et la touche est mémorisée par sa position physique — le raccourci reste donc le même en AZERTY comme en QWERTY. Le choix est conservé entre les sessions.
@@ -22,10 +26,6 @@ Panneau d'options → **« Modifier le raccourci… »**, puis appuyez sur la co
 Une touche seule, sans Ctrl ni Alt, est acceptée mais se déclenchera aussi pendant que vous tapez du texte : `A` seul lancerait un enregistrement à chaque lettre A écrite. L'application le signale au moment du choix. Les touches de fonction (F1 à F12) et celles du pavé numérique n'ont pas ce problème.
 
 Le raccourci est écouté au niveau du système, en amont des applications. Windows ne distingue pas une touche tapée au doigt d'une touche émise par un périphérique programmable : clavier, souris à macros, pédale ou StreamDeck déclenchent l'enregistrement de la même façon, sans configuration particulière.
-
-Une fois la transcription terminée, le texte est collé dans le champ actif et/ou copié dans le presse-papier selon les deux toggles indépendants (voir Options).
-
-La croix de la fenêtre réduit dans la barre système (configurable). Clic droit sur l'icône rouge → **Afficher** ou **Quitter**.
 
 ## Fonctionnalités
 
