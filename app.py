@@ -30,7 +30,6 @@ for flux in (sys.stdout, sys.stderr):
     if flux is not None:
         flux.reconfigure(encoding='utf-8', errors='replace')
 
-# Charger les variables d'environnement
 load_dotenv()
 
 # Modèles compatibles v1/audio/transcriptions : (libellé UI, identifiant API).
@@ -62,7 +61,6 @@ MODEL_PRICING = {
     },
 }
 
-
 def compute_transcription_cost(model, usage, duration_sec):
     """Retourne (coût USD, exact) d'après le `usage` renvoyé par l'API."""
     pricing = MODEL_PRICING.get(model)
@@ -82,20 +80,13 @@ def compute_transcription_cost(model, usage, duration_sec):
 
     return duration_sec / 60 * pricing["est_per_minute"], False
 
-# Fichier d'historique persistant (à côté du script)
 HISTORY_FILE = Path(__file__).parent / "transcription_history.json"
 
-# Fichier de préférences utilisateur (micro, modèle, toggles, durée)
 PREFS_FILE = Path(__file__).parent / "user_preferences.json"
 
-# --- Raccourci global : modificateurs, libellés de touches, sérialisation -----
 
 def _build_modifier_map():
-    """Associe chaque variante de modificateur pynput à un nom canonique.
-
-    pynput expose plusieurs objets pour un même modificateur (ctrl_l, ctrl_r…) et
-    tous n'existent pas sur toutes les plateformes, d'où le getattr défensif.
-    """
+    """Associe chaque variante de modificateur pynput (ctrl_l, ctrl_r…) à un nom canonique."""
     variants = {
         'ctrl': ('ctrl', 'ctrl_l', 'ctrl_r'),
         'alt': ('alt', 'alt_l', 'alt_r', 'alt_gr'),
@@ -109,7 +100,6 @@ def _build_modifier_map():
             if key is not None:
                 mapping[key] = canonical
     return mapping
-
 
 MODIFIER_NAMES = _build_modifier_map()
 MODIFIER_ORDER = ('ctrl', 'alt', 'shift', 'win')
@@ -131,9 +121,12 @@ VK_LABELS.update({vk: chr(vk) for vk in range(65, 91)})                 # A-Z
 VK_LABELS.update({vk: 'Pavé num %d' % (vk - 96) for vk in range(96, 106)})
 VK_LABELS.update({vk: 'F%d' % (vk - 111) for vk in range(112, 136)})
 
-# Touches jamais utilisées pour saisir du texte : les seules qu'on accepte sans
-# modificateur sans avertir l'utilisateur.
 SAFE_BARE_VKS = set(range(112, 136))                                    # F1-F24
+
+# Windows réémet « touche enfoncée » tant que la touche reste pressée : sans ces
+# deux gardes, un appui un peu long bascule deux fois et coupe l'enregistrement.
+HOTKEY_REPEAT_GAP = 1.0      # au-delà, deux appuis ne peuvent plus être une répétition
+HOTKEY_MIN_INTERVAL = 0.35   # intervalle minimum entre deux bascules réelles
 
 DEFAULT_HOTKEY = {
     'modifiers': ['ctrl', 'alt'],
@@ -142,7 +135,6 @@ DEFAULT_HOTKEY = {
     'vks': [57, 105],
 }
 
-
 def describe_hotkey(hotkey):
     """Rend un raccourci lisible : {'modifiers': ['ctrl','alt'], 'vks': [57]} -> 'Ctrl+Alt+9'."""
     parts = [MODIFIER_LABELS[m] for m in MODIFIER_ORDER if m in hotkey['modifiers']]
@@ -150,14 +142,8 @@ def describe_hotkey(hotkey):
     parts.append(VK_LABELS.get(vks[0], 'VK %d' % vks[0]) if vks else '?')
     return '+'.join(parts)
 
-
 def normalize_hotkey(value):
-    """Valide un raccourci lu depuis les préférences, sinon retourne le défaut.
-
-    Les préférences sont un fichier JSON éditable à la main : on ne fait jamais
-    confiance à son contenu, un raccourci invalide ne doit pas empêcher l'app de
-    démarrer.
-    """
+    """Valide un raccourci lu depuis les préférences, sinon retourne le défaut."""
     try:
         modifiers = [m for m in MODIFIER_ORDER if m in value['modifiers']]
         vks = [int(v) for v in value['vks'] if 0 < int(v) < 256]
@@ -168,31 +154,27 @@ def normalize_hotkey(value):
     return {'modifiers': list(DEFAULT_HOTKEY['modifiers']),
             'vks': list(DEFAULT_HOTKEY['vks'])}
 
-
 DEFAULT_PREFS = {
     "selected_model": "gpt-transcribe",
     "selected_device_name": None,   # Nom du micro (pas l'index — plus stable entre sessions)
     "max_recording_duration": 240,
-    "auto_copy": True,    # Laisser le texte dans le presse-papier après transcription
-    "auto_paste": True,   # Injecter le texte dans le champ actif (indépendant de auto_copy)
+    "auto_copy": True,
+    "auto_paste": True,
     "sound_enabled": True,
-    "overlay_enabled": True,                 # Afficher l'overlay flottant pendant les états
-    "minimize_to_tray_on_close": True,       # La croix réduit dans la tray au lieu de quitter
-    "terminal_paste": False,                 # Coller avec Ctrl+Shift+V (compatible terminaux)
-    "overlay_position": None,                # [x, y] de l'overlay après drag utilisateur
-    "hotkey": DEFAULT_HOTKEY,                # Raccourci global (voir normalize_hotkey)
+    "overlay_enabled": True,
+    "minimize_to_tray_on_close": True,
+    "terminal_paste": False,
+    "overlay_position": None,
+    "hotkey": DEFAULT_HOTKEY,
 }
 
 ENV_FILE = Path(__file__).parent / ".env"
 
-# Valeurs d'exemple de .env.example. `setup.bat` copie ce fichier vers .env, donc
-# OPENAI_API_KEY est défini dès l'installation alors qu'aucune clé n'est saisie :
-# sans ce filtre l'app annoncerait « clé configurée » puis échouerait en 401 à la
-# première dictée.
+# setup.bat copie .env.example vers .env : OPENAI_API_KEY est donc défini avec la
+# valeur d'exemple avant toute saisie de clé.
 API_KEY_PLACEHOLDERS = {
     "votre_cle_api_ici", "your_api_key_here", "sk-xxx", "sk-...",
 }
-
 
 def read_api_key():
     """Retourne la clé API si elle est réellement renseignée, sinon None."""
@@ -201,7 +183,6 @@ def read_api_key():
         return None
     return key
 
-# Port local réservé par l'instance en cours (voir acquire_single_instance_lock).
 SINGLE_INSTANCE_PORT = 49731
 
 # pystray + Pillow sont optionnels : l'app démarre aussi sans, la tray est juste désactivée.
@@ -211,7 +192,6 @@ try:
     TRAY_AVAILABLE = True
 except ImportError:
     TRAY_AVAILABLE = False
-
 
 class ToolTip:
     """Tooltip minimaliste en pur tkinter (pas de dep).
@@ -268,7 +248,6 @@ class ToolTip:
                 pass
             self.tip_window = None
 
-
 class FloatingOverlay:
     """Overlay translucide pour afficher l'état courant (enregistrement,
     transcription, résultat). Visible même quand l'app est réduite/dans la tray.
@@ -282,10 +261,10 @@ class FloatingOverlay:
     """
 
     CORNER_RADIUS = 14
-    HANDLE_DEBORD = 2           # Débord visuel de la poignée hors de l'overlay (px)
+    HANDLE_DEBORD = 2
     ALPHA_OVERLAY = 0.68
-    ALPHA_HANDLE_REST = 0.78    # Un peu plus opaque que l'overlay, pour que les points soient lisibles
-    ALPHA_HANDLE_ACTIVE = 0.95  # Au survol / pendant le drag
+    ALPHA_HANDLE_REST = 0.78
+    ALPHA_HANDLE_ACTIVE = 0.95
 
     def __init__(self, root, on_position_saved=None):
         self.root = root
@@ -293,14 +272,13 @@ class FloatingOverlay:
         self.custom_position = None  # (x, y) coin haut-gauche de l'overlay, None = défaut centré-haut
         self.on_position_saved = on_position_saved
         self._hide_after_id = None
-        self._handle_show_after_id = None  # affichage différé de la poignée (anti-jitter)
+        self._handle_show_after_id = None
         self._drag_offset_x = 0
         self._drag_offset_y = 0
-        self._drag_handle_dx = 0  # delta poignée→overlay capturé au début du drag
+        self._drag_handle_dx = 0
         self._drag_handle_dy = 0
         self._is_dragging = False
 
-        # --- Overlay principal (click-through) ---
         self.win = tk.Toplevel(root)
         self.win.overrideredirect(True)
         self.win.attributes('-topmost', True)
@@ -312,9 +290,6 @@ class FloatingOverlay:
         )
         self.label.pack()
 
-        # --- Poignée de drag (NON click-through, cliquable) ---
-        # Même fond que l'overlay (mis à jour dans show()), dots blancs pour le contraste.
-        # Alpha dynamique : discret au repos, plus prononcé au survol/drag.
         self.handle = tk.Toplevel(root)
         self.handle.overrideredirect(True)
         self.handle.attributes('-topmost', True)
@@ -332,12 +307,10 @@ class FloatingOverlay:
             widget.bind('<Enter>', self._on_handle_enter, add='+')
             widget.bind('<Leave>', self._on_handle_leave, add='+')
 
-        # Cachés par défaut, apparaissent lors d'un état
         self.win.withdraw()
         self.handle.withdraw()
 
-        # Appliquer styles Windows (click-through, arrondis) après que les
-        # fenêtres existent effectivement côté OS.
+        # Les styles Windows exigent que les fenêtres existent déjà côté OS.
         self.win.update_idletasks()
         self.handle.update_idletasks()
         self._enable_click_through()
@@ -410,7 +383,6 @@ class FloatingOverlay:
             x = max((screen_w - w) // 2, 10)
             y = 30
 
-        # Sécurité multi-écran : garder l'overlay visible
         x = max(0, min(x, max(0, screen_w - w)))
         y = max(0, min(y, max(0, screen_h - h)))
 
@@ -427,7 +399,6 @@ class FloatingOverlay:
         overlay_h = self.win.winfo_height()
         handle_w = self.handle.winfo_width()
         handle_h = self.handle.winfo_height()
-        # Coin bas-droite, avec ~2px de débord sur la droite et en bas
         hx = overlay_x + overlay_w - handle_w + self.HANDLE_DEBORD
         hy = overlay_y + overlay_h - handle_h + self.HANDLE_DEBORD
         self.handle.geometry(f"+{max(0, hx)}+{max(0, hy)}")
@@ -449,11 +420,8 @@ class FloatingOverlay:
             pass
 
     def _on_drag_start(self, event):
-        # Offset du clic dans la poignée
         self._drag_offset_x = event.x_root - self.handle.winfo_rootx()
         self._drag_offset_y = event.y_root - self.handle.winfo_rooty()
-        # Delta poignée → overlay capturé une fois au début (indépendant de la
-        # géométrie, fonctionne qu'on place la poignée haut-gauche ou bas-droite)
         self._drag_handle_dx = self.handle.winfo_rootx() - self.win.winfo_rootx()
         self._drag_handle_dy = self.handle.winfo_rooty() - self.win.winfo_rooty()
         self._is_dragging = True
@@ -468,7 +436,6 @@ class FloatingOverlay:
         new_overlay_x = new_handle_x - self._drag_handle_dx
         new_overlay_y = new_handle_y - self._drag_handle_dy
 
-        # Clamp aux bornes de l'écran (sécurité multi-écran)
         screen_w = self.win.winfo_screenwidth()
         screen_h = self.win.winfo_screenheight()
         w = self.win.winfo_width()
@@ -477,7 +444,6 @@ class FloatingOverlay:
         new_overlay_y = max(0, min(new_overlay_y, max(0, screen_h - h)))
 
         self.win.geometry(f"+{new_overlay_x}+{new_overlay_y}")
-        # Repositionner la poignée relativement à la nouvelle position de l'overlay
         self._position_handle()
 
     def _on_drag_release(self, event):
@@ -502,16 +468,12 @@ class FloatingOverlay:
 
         self.label.config(text=text, bg=bg)
         self.win.configure(bg=bg)
-        # Poignée : même couleur que l'overlay pour qu'elle s'y intègre visuellement
         self.handle.configure(bg=bg)
         self.handle_label.configure(bg=bg)
 
-        # Tk ne finalise la géométrie d'un Toplevel qu'une fois mappé. Au premier
-        # show, un update_idletasks() ne suffit donc pas : la fenêtre apparaît
-        # brièvement à une taille pré-layout puis se redimensionne (flash visible).
-        # Parade : au premier show, on la rend invisible (alpha=0) et on la place
-        # hors écran, on force un cycle d'événements pour que tk mesure vraiment,
-        # puis on la replace à la bonne position et on rétablit l'alpha.
+        # Tk ne finalise la géométrie d'un Toplevel qu'une fois mappé : au premier
+        # show la fenêtre apparaîtrait à une taille pré-layout. On la matérialise
+        # donc invisible et hors écran avant de la placer réellement.
         first_show = not self.win.winfo_viewable()
         if first_show:
             self.win.attributes('-alpha', 0.0)
@@ -528,8 +490,7 @@ class FloatingOverlay:
 
         self.win.attributes('-topmost', True)
 
-        # Poignée : affichage différé (~30ms) si pas déjà visible — laisse le
-        # temps à tk de finaliser totalement avant qu'on la positionne.
+        # Différé : laisse tk finaliser la géométrie avant de placer la poignée.
         if not self.handle.winfo_viewable():
             if self._handle_show_after_id is not None:
                 try:
@@ -541,10 +502,8 @@ class FloatingOverlay:
     def _show_handle_delayed(self):
         """Affiche la poignée après que l'overlay principal ait fini son layout."""
         self._handle_show_after_id = None
-        # Si entre-temps l'overlay a été masqué ou désactivé, on renonce
         if not self.enabled or not self.win.winfo_viewable():
             return
-        # Re-positionner maintenant que les tailles sont réellement définitives
         self._position_handle()
         self.handle.deiconify()
         self.handle.attributes('-topmost', True)
@@ -562,7 +521,6 @@ class FloatingOverlay:
             except Exception:
                 pass
             self._hide_after_id = None
-        # Annuler l'affichage différé de la poignée si en attente
         if self._handle_show_after_id is not None:
             try:
                 self.root.after_cancel(self._handle_show_after_id)
@@ -572,68 +530,55 @@ class FloatingOverlay:
         self.win.withdraw()
         self.handle.withdraw()
 
-
 class VoiceTranscriptionApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Transcription Vocale - Whisper")
-        # Taille par défaut plus grande et adaptée à un écran standard
         self.root.geometry("800x800")
         self.root.resizable(True, True)
-        # Taille minimale pour éviter que la fenêtre soit trop petite
         self.root.minsize(600, 500)
         
-        # État de l'application
         self.is_recording = False
-        self.is_transcribing = False  # Indique si une transcription est en cours
-        self.cancel_requested = False  # Flag pour annuler la transcription
+        self.is_transcribing = False
+        self.cancel_requested = False
         self.audio_frames = []
         self.recording_thread = None
-        self.recording_start_time = None  # Timestamp du début d'enregistrement
-        self.selected_device_index = None  # Index du microphone sélectionné
+        self.recording_start_time = None
+        self.selected_device_index = None
 
-        # Préférences utilisateur persistantes (micro, modèle, durée, toggles)
         self.prefs = self._load_prefs()
 
-        # Modèle de transcription sélectionné (via prefs)
         self.selected_model = self.prefs.get("selected_model", DEFAULT_PREFS["selected_model"])
-        # Sécurité : si le fichier de prefs contient un modèle inconnu, retomber sur le défaut
         if self.selected_model not in MODEL_PRICING:
             self.selected_model = DEFAULT_PREFS["selected_model"]
 
-        # Nom du micro préféré (appliqué par _load_microphones si toujours présent)
         self.preferred_mic_name = self.prefs.get("selected_device_name")
 
-        # Suivi des coûts de la session (réinitialisé à chaque démarrage)
         self.session_cost = 0.0
         self.session_transcriptions = 0
         self.session_started_at = datetime.now()
 
-        # Historique persistant (chargé au démarrage)
         self.history = self._load_history()
 
-        # Historique pour undo (Ctrl+Z)
         self.text_history = []
         self.history_index = -1
 
-        # Thread pour les raccourcis clavier
         self.hotkey_thread = None
         self.esc_thread = None
 
-        # Configuration audio
         self.CHANNELS = 1
         self.RATE = 44100
         self.DTYPE = np.int16
 
-        # Durée maximum d'enregistrement (via prefs)
         self.max_recording_duration = int(self.prefs.get("max_recording_duration", 240))
 
-        # Raccourci global, validé au chargement. `_hotkey_capture` vaut None sauf
-        # pendant que la fenêtre de capture est ouverte (voir _open_hotkey_dialog).
         self.hotkey = normalize_hotkey(self.prefs.get("hotkey"))
         self._hotkey_capture = None
 
-        # Nom du micro affiché avant que _load_microphones ne remplisse la liste
+        self._hotkey_down = False
+        self._hotkey_last_press = 0.0
+        self._hotkey_last_toggle = 0.0
+
         self.microphone_name = "Chargement..."
 
         # BooleanVars créées ici (avant setup_ui) pour pouvoir attacher les traces
@@ -651,9 +596,7 @@ class VoiceTranscriptionApp:
         self.minimize_to_tray_var.trace_add('write', lambda *_: self._save_prefs())
         self.terminal_paste_var.trace_add('write', lambda *_: self._on_paste_toggles_changed())
 
-        # Client OpenAI — non bloquant si la clé est absente (l'utilisateur peut la
-        # renseigner via l'UI). Le bouton d'enregistrement affichera un message
-        # d'erreur clair si on tente d'enregistrer sans clé.
+        # Non bloquant sans clé : elle peut être saisie depuis l'interface.
         self.client = None
         api_key = read_api_key()
         if api_key:
@@ -662,20 +605,16 @@ class VoiceTranscriptionApp:
             except Exception as e:
                 print(f"⚠️ Init OpenAI échouée (clé probablement invalide): {e}")
 
-        # Chemin des sons
         self.sounds_dir = os.path.join(os.path.dirname(__file__), 'sounds')
         os.makedirs(self.sounds_dir, exist_ok=True)
 
-        # Interface (créée en premier pour affichage immédiat)
         self.setup_ui()
 
-        # Overlay flottant (créé après la fenêtre principale pour héritage correct)
         self.overlay = FloatingOverlay(
             self.root,
             on_position_saved=self._on_overlay_position_saved
         )
         self.overlay.enabled = self.overlay_enabled_var.get()
-        # Restaurer la position sauvegardée (si elle existe et est bien formée)
         saved_pos = self.prefs.get("overlay_position")
         if isinstance(saved_pos, (list, tuple)) and len(saved_pos) == 2:
             try:
@@ -683,28 +622,23 @@ class VoiceTranscriptionApp:
             except (TypeError, ValueError):
                 pass
 
-        # Initialisations lourdes différées (pygame + hotkey + tray) pour que la
-        # fenêtre s'affiche instantanément, sans frame noir ni délai visible.
+        # Différées pour que la fenêtre s'affiche instantanément.
         self.tray_icon = None
         self.root.after(100, self._deferred_init)
     
     def setup_ui(self):
         """Crée l'interface utilisateur"""
         
-        # Frame principal avec layout horizontal
         main_container = tk.Frame(self.root)
         main_container.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
         
-        # Colonne de gauche (options) — élargie pour que les libellés tiennent
         left_panel = tk.Frame(main_container, width=240)
         left_panel.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 20))
         left_panel.pack_propagate(False)
         
-        # Colonne principale (contenu)
         main_frame = tk.Frame(main_container)
         main_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         
-        # Titre
         title_label = tk.Label(
             main_frame,
             text="🎙️ Transcription Vocale",
@@ -712,11 +646,9 @@ class VoiceTranscriptionApp:
         )
         title_label.pack(pady=(0, 15))
         
-        # Frame pour les boutons d'enregistrement
         record_button_frame = tk.Frame(main_frame)
         record_button_frame.pack(pady=10)
         
-        # Bouton Enregistrer/Arrêter
         self.record_button = tk.Button(
             record_button_frame,
             text="🎤 Démarrer l'enregistrement",
@@ -730,7 +662,6 @@ class VoiceTranscriptionApp:
         )
         self.record_button.pack(side=tk.LEFT, padx=5)
         
-        # Bouton Annuler (caché par défaut)
         self.cancel_button = tk.Button(
             record_button_frame,
             text="❌ Annuler",
@@ -742,9 +673,7 @@ class VoiceTranscriptionApp:
             width=15,
             height=2
         )
-        # Ne pas packer pour l'instant, sera affiché pendant l'enregistrement
         
-        # Affichage du raccourci clavier (sous les boutons)
         self.hotkey_label = tk.Label(
             main_frame,
             text=self._hotkey_banner(),
@@ -753,7 +682,6 @@ class VoiceTranscriptionApp:
         )
         self.hotkey_label.pack(pady=(5, 10))
         
-        # Panel gauche : Options avec cadre
         options_frame = tk.LabelFrame(
             left_panel,
             text="Options",
@@ -763,7 +691,6 @@ class VoiceTranscriptionApp:
         )
         options_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
-        # Clé API OpenAI — section en haut pour les utilisateurs qui partent d'un repo nu
         tk.Label(
             options_frame,
             text="Clé API OpenAI:",
@@ -789,7 +716,6 @@ class VoiceTranscriptionApp:
 
         tk.Frame(options_frame, height=1, bg="#cccccc").pack(fill=tk.X, pady=(4, 8))
 
-        # Raccourci global
         tk.Label(
             options_frame,
             text="Raccourci:",
@@ -815,7 +741,6 @@ class VoiceTranscriptionApp:
 
         tk.Frame(options_frame, height=1, bg="#cccccc").pack(fill=tk.X, pady=(4, 8))
 
-        # Microphone actuel
         tk.Label(
             options_frame,
             text="Micro:",
@@ -833,7 +758,6 @@ class VoiceTranscriptionApp:
         )
         self.mic_display_label.pack(anchor=tk.W, fill=tk.X, pady=(0, 5))
         
-        # Sélection du microphone
         tk.Label(
             options_frame,
             text="Changer:",
@@ -845,7 +769,6 @@ class VoiceTranscriptionApp:
         self.mic_dropdown.config(width=24, font=("Arial", 8), anchor="w")
         self.mic_dropdown.pack(anchor=tk.W, fill=tk.X, pady=(0, 10))
 
-        # Sélection du modèle de transcription
         tk.Label(
             options_frame,
             text="Modèle:",
@@ -881,7 +804,6 @@ class VoiceTranscriptionApp:
             wraplength=280
         )
 
-        # Curseur pour la durée maximum (horizontal)
         tk.Label(
             options_frame,
             text="Durée max:",
@@ -898,7 +820,7 @@ class VoiceTranscriptionApp:
             length=150,
             command=self._on_duration_change,
             resolution=30,  # Snap à 30 secondes (demi-minutes)
-            showvalue=False  # Retirer le chiffre en secondes qui suit le curseur
+            showvalue=False
         )
         self.duration_slider.pack(fill=tk.X, pady=5, padx=5)
         
@@ -910,10 +832,8 @@ class VoiceTranscriptionApp:
         )
         self.duration_label.pack(pady=(0, 5))
 
-        # Toggles comportement (les BooleanVars sont créées dans __init__
-        # pour attacher les traces d'auto-save avant le premier rendu).
-        # Copie et collage sont décorrélés : coller sans copier est possible
-        # (le presse-papier est restauré à sa valeur d'origine après collage).
+        # Copie et collage sont décorrélés : coller sans copier restaure le
+        # presse-papier à sa valeur d'origine après le collage.
         tk.Checkbutton(
             options_frame,
             text="Copier dans le presse-papier",
@@ -974,7 +894,6 @@ class VoiceTranscriptionApp:
             anchor="w"
         ).pack(anchor=tk.W, fill=tk.X)
 
-        # Séparateur + suivi des coûts de la session
         tk.Frame(options_frame, height=1, bg="#cccccc").pack(fill=tk.X, pady=(12, 6))
 
         tk.Label(
@@ -1002,7 +921,6 @@ class VoiceTranscriptionApp:
         )
         self.session_cost_label.pack(anchor=tk.W, fill=tk.X, pady=(0, 5))
 
-        # Statistiques mois en cours
         tk.Frame(options_frame, height=1, bg="#cccccc").pack(fill=tk.X, pady=(8, 6))
 
         month_header = tk.Frame(options_frame)
@@ -1054,10 +972,8 @@ class VoiceTranscriptionApp:
         )
         self.clear_history_button.pack(anchor=tk.W, fill=tk.X)
 
-        # Charger la liste des microphones (après que l'interface soit créée)
         self.root.after(100, self._load_microphones)
         
-        # Zone de texte pour la transcription
         text_frame = tk.Frame(main_frame)
         text_frame.pack(fill=tk.BOTH, expand=True, pady=10)
         
@@ -1076,13 +992,11 @@ class VoiceTranscriptionApp:
         )
         self.text_area.pack(fill=tk.BOTH, expand=True, pady=(5, 0))
         
-        # Raccourci Ctrl+Z pour undo
         self.text_area.bind('<Control-z>', self.undo_clear)
         self.text_area.bind('<Control-Z>', self.undo_clear)
         self.root.bind('<Control-z>', self.undo_clear)
         self.root.bind('<Control-Z>', self.undo_clear)
         
-        # Boutons d'action
         button_frame = tk.Frame(main_frame)
         button_frame.pack(pady=15, fill=tk.X)
         
@@ -1110,7 +1024,6 @@ class VoiceTranscriptionApp:
         )
         self.copy_button.pack(side=tk.LEFT, padx=10, fill=tk.X, expand=True)
 
-        # Status bar en bas : enregistrement / transcription / feedback
         status_bar = tk.Frame(main_frame, bg="#f0f0f0", relief=tk.SUNKEN, bd=1)
         status_bar.pack(side=tk.BOTTOM, fill=tk.X, pady=(10, 0))
 
@@ -1126,12 +1039,9 @@ class VoiceTranscriptionApp:
         )
         self.status_label.pack(fill=tk.X)
 
-        # Initialiser affichages dynamiques (stats mois + clé API + label durée)
         self._update_session_display()
         self._update_api_key_status(ok=(self.client is not None))
-        # Forcer la mise à jour du label "durée" pour matcher la valeur persistée
         self._on_duration_change(self.max_recording_duration)
-        # Appliquer l'état visuel initial des toggles de collage (enabled/disabled)
         self._on_paste_toggles_changed()
 
     def _load_microphones(self):
@@ -1139,7 +1049,6 @@ class VoiceTranscriptionApp:
         try:
             devices = sd.query_devices()
             
-            # Mots-clés à exclure (périphériques virtuels, mappers, etc.)
             exclude_keywords = [
                 'mixage', 'mix', 'stereo mix', 'stéréo mix',
                 'mapper', 'microsoft', 'mappeur',
@@ -1151,59 +1060,50 @@ class VoiceTranscriptionApp:
                 'wave speaker', 'wave microphone headphone'
             ]
             
-            # Filtrer les périphériques d'entrée réels
             input_devices = []
-            seen_names = set()  # Pour dédupliquer par nom exact
+            seen_names = set()
             
             for idx, device in enumerate(devices):
                 if device['max_input_channels'] > 0:
                     name = device['name']
                     name_lower = name.lower()
                     
-                    # Exclure les périphériques avec patterns suspects
                     if '@' in name or 'system32' in name_lower or '.sys' in name_lower:
                         continue
                     
-                    # Exclure les périphériques virtuels/non-microphones par mots-clés
                     if any(keyword in name_lower for keyword in exclude_keywords):
                         continue
                     
-                    # Dédupliquer par nom exact (même nom = même périphérique, peu importe le hostapi)
-                    # Normaliser le nom (enlever espaces en fin, parenthèses manquantes, etc.)
                     normalized_name = name.strip()
-                    # Corriger les noms tronqués (ajouter parenthèse fermante si manquante)
                     if normalized_name.count('(') > normalized_name.count(')'):
                         normalized_name += ')'
                     
                     if normalized_name not in seen_names:
                         seen_names.add(normalized_name)
                         input_devices.append({
-                            'index': idx,  # Index réel dans sd.query_devices()
+                            'index': idx,
                             'name': normalized_name,
                             'device': device
                         })
             
             if input_devices:
-                # Trier par nom pour une meilleure lisibilité
                 input_devices.sort(key=lambda x: x['name'])
                 
                 device_names = [d['name'] for d in input_devices]
                 current_mic = self.microphone_name if hasattr(self, 'microphone_name') else device_names[0]
                 self.mic_var.set(current_mic)
                 
-                # Recréer le menu avec les microphones filtrés
                 menu = self.mic_dropdown['menu']
                 menu.delete(0, 'end')
                 
                 for device_info in input_devices:
                     name = device_info['name']
-                    real_index = device_info['index']  # Index réel du périphérique
+                    real_index = device_info['index']
                     menu.add_command(
                         label=name,
                         command=lambda idx=real_index, n=name: self._change_microphone(idx, n)
                     )
                 
-                # Priorité 1 : micro persisté dans les préférences (si toujours disponible)
                 chosen = None
                 if self.preferred_mic_name:
                     for device_info in input_devices:
@@ -1211,7 +1111,6 @@ class VoiceTranscriptionApp:
                             chosen = device_info
                             break
 
-                # Priorité 2 : micro par défaut de Windows
                 if chosen is None:
                     try:
                         default_input_idx = sd.default.device[0]
@@ -1223,7 +1122,6 @@ class VoiceTranscriptionApp:
                     except Exception:
                         pass
 
-                # Priorité 3 : premier micro disponible
                 if chosen is None:
                     chosen = input_devices[0]
 
@@ -1231,7 +1129,6 @@ class VoiceTranscriptionApp:
                 self.microphone_name = chosen['name']
                 self.mic_var.set(self.microphone_name)
                 
-                # Mettre à jour l'affichage
                 self.mic_display_label.config(text=self.microphone_name)
         except Exception as e:
             print(f"Erreur chargement microphones: {e}")
@@ -1269,14 +1166,13 @@ class VoiceTranscriptionApp:
         """Génère programmatiquement l'icône de la tray (évite de shipper un binaire)."""
         img = Image.new('RGBA', (64, 64), (0, 0, 0, 0))
         d = ImageDraw.Draw(img)
-        d.ellipse((4, 4, 60, 60), fill=(220, 50, 50, 255))       # fond rouge
-        # Corps du micro (rectangle arrondi, fallback si Pillow ancien)
+        d.ellipse((4, 4, 60, 60), fill=(220, 50, 50, 255))
         try:
             d.rounded_rectangle((24, 16, 40, 40), radius=8, fill=(255, 255, 255, 255))
         except AttributeError:
             d.rectangle((24, 16, 40, 40), fill=(255, 255, 255, 255))
-        d.rectangle((30, 40, 34, 48), fill=(255, 255, 255, 255))  # pied
-        d.rectangle((22, 48, 42, 52), fill=(255, 255, 255, 255))  # base
+        d.rectangle((30, 40, 34, 48), fill=(255, 255, 255, 255))
+        d.rectangle((22, 48, 42, 52), fill=(255, 255, 255, 255))
         return img
 
     def _setup_tray(self):
@@ -1374,7 +1270,6 @@ class VoiceTranscriptionApp:
         - auto_paste désactivé  → terminal_paste forcé à False
         Met à jour l'état visuel (disabled) des deux cases pour rendre
         la contrainte lisible à l'utilisateur."""
-        # Invariants
         if self.terminal_paste_var.get() and not self.auto_paste_var.get():
             self.auto_paste_var.set(True)
             return  # la trace auto_paste va re-déclencher la méthode
@@ -1382,13 +1277,10 @@ class VoiceTranscriptionApp:
             self.terminal_paste_var.set(False)
             return
 
-        # État visuel
         if hasattr(self, 'auto_paste_checkbox') and hasattr(self, 'terminal_paste_checkbox'):
             auto_paste_on = self.auto_paste_var.get()
             terminal_on = self.terminal_paste_var.get()
-            # Si terminal est coché, auto_paste est verrouillé à True
             self.auto_paste_checkbox.config(state='disabled' if terminal_on else 'normal')
-            # Si auto_paste est décoché, terminal_paste est verrouillé à False
             self.terminal_paste_checkbox.config(state='normal' if auto_paste_on else 'disabled')
 
         self._save_prefs()
@@ -1484,7 +1376,6 @@ class VoiceTranscriptionApp:
     def _save_api_key(self, new_key):
         """Valide la clé auprès d'OpenAI, puis (seulement en cas de succès) l'enregistre
         dans .env et recharge le client. Évite de polluer .env avec une clé invalide."""
-        # 1) Validation : appel gratuit (models.list) pour vérifier que la clé est active
         try:
             temp_client = OpenAI(api_key=new_key)
             temp_client.models.list()
@@ -1496,7 +1387,6 @@ class VoiceTranscriptionApp:
             )
             return False
 
-        # 2) Écriture dans .env en préservant les autres variables éventuelles
         try:
             lines = []
             if ENV_FILE.exists():
@@ -1693,7 +1583,6 @@ class VoiceTranscriptionApp:
             text=f"🔴 Enregistrement  {timer_text}",
             fg="red"
         )
-        # Overlay flottant (visible même app réduite/cachée)
         if hasattr(self, 'overlay'):
             self.overlay.show(f"🔴 {timer_text}", bg="#c62828")
 
@@ -1701,19 +1590,14 @@ class VoiceTranscriptionApp:
     
     def _on_duration_change(self, value):
         """Appelé quand le curseur change"""
-        # Arrondir à la demi-minute la plus proche (snap à 30 secondes)
         raw_value = int(float(value))
-        # Arrondir à la demi-minute la plus proche
         rounded_value = round(raw_value / 30) * 30
         
-        # Si la valeur a changé, mettre à jour le slider + sauvegarder
         if rounded_value != self.max_recording_duration:
             self.max_recording_duration = rounded_value
-            # Mettre à jour la valeur du slider sans déclencher le callback
             self.duration_var.set(rounded_value)
             self._save_prefs()
         
-        # Afficher en minutes (toujours des multiples de 30 secondes)
         if self.max_recording_duration >= 60:
             minutes = self.max_recording_duration // 60
             seconds = self.max_recording_duration % 60
@@ -1722,21 +1606,17 @@ class VoiceTranscriptionApp:
             else:
                 display = f"{minutes} min {seconds}s"
         else:
-            # En dessous de 60 secondes, on garde les secondes mais on snap quand même
             display = f"{self.max_recording_duration}s"
         
         self.duration_label.config(text=display)
     
     def toggle_recording(self):
         """Bascule entre démarrer et arrêter l'enregistrement"""
-        # Empêcher les appels parallèles
         if self.is_transcribing:
-            # Une transcription est en cours, jouer un son d'erreur
             self.play_sound('error.wav', volume=0.3)
             return
 
         if not self.is_recording:
-            # Vérifier que la clé API est configurée avant de démarrer
             if self.client is None:
                 messagebox.showwarning(
                     "Clé API manquante",
@@ -1755,18 +1635,14 @@ class VoiceTranscriptionApp:
             return
         try:
             sound_path = os.path.join(self.sounds_dir, filename)
-            # Essayer WAV d'abord
             if not os.path.exists(sound_path):
-                # Essayer sans extension
                 sound_path = sound_path.replace('.mp3', '.wav')
 
             if os.path.exists(sound_path):
-                # Utiliser pygame pour contrôler le volume
                 sound = pygame.mixer.Sound(sound_path)
-                sound.set_volume(volume)  # Volume réglable (0.0 à 1.0)
+                sound.set_volume(volume)
                 sound.play()
         except Exception as e:
-            # Fallback sur winsound si pygame échoue
             try:
                 import winsound
                 winsound.PlaySound(sound_path, winsound.SND_FILENAME | winsound.SND_ASYNC)
@@ -1775,7 +1651,6 @@ class VoiceTranscriptionApp:
     
     def start_recording(self):
         """Démarre l'enregistrement audio"""
-        # Double vérification (au cas où)
         if self.is_transcribing:
             self.play_sound('error.wav', volume=0.3)
             return
@@ -1785,24 +1660,19 @@ class VoiceTranscriptionApp:
         self.audio_frames = []
         self.recording_start_time = time.time()
         
-        # Jouer le son de début
         self.play_sound('start.wav')
         
-        # Mettre à jour l'interface
         self.record_button.config(
             text="⏹️ Arrêter",
             bg="#f44336",
             activebackground="#da190b"
         )
-        # Afficher le bouton Annuler
         self.cancel_button.pack(side=tk.LEFT, padx=5)
         self.status_label.config(text="🔴 Enregistrement en cours...", fg="red")
         
-        # Démarrer l'enregistrement dans un thread séparé
         self.recording_thread = threading.Thread(target=self._record_audio, daemon=True)
         self.recording_thread.start()
 
-        # Lancer le timer visuel dans la barre de statut
         self.root.after(100, self._update_recording_timer)
     
     def cancel_recording(self):
@@ -1811,7 +1681,6 @@ class VoiceTranscriptionApp:
             self.is_recording = False
             self.cancel_requested = True
             self.audio_frames = []
-            # Jouer le son d'erreur pour feedback sonore
             self.play_sound('error.wav', volume=0.3)
             self._reset_ui("Enregistrement annulé")
             self.status_label.config(text="❌ Enregistrement annulé", fg="orange")
@@ -1826,10 +1695,8 @@ class VoiceTranscriptionApp:
         
         self.is_recording = False
         
-        # Cacher le bouton Annuler
         self.cancel_button.pack_forget()
         
-        # Jouer le son léger indiquant que l'enregistrement est arrêté (avant transcription)
         self.play_sound('recording_stopped.wav', volume=0.2)
 
         self.status_label.config(text="⏳ Traitement en cours...", fg="orange")
@@ -1837,7 +1704,6 @@ class VoiceTranscriptionApp:
         if hasattr(self, 'overlay'):
             self.overlay.show("⏳ Transcription…", bg="#1565c0")
         
-        # Arrêter l'enregistrement dans un thread séparé
         threading.Thread(target=self._process_recording, daemon=True).start()
     
     def _record_audio(self):
@@ -1881,12 +1747,10 @@ class VoiceTranscriptionApp:
     
     def _process_recording(self):
         """Traite l'enregistrement et transcrit"""
-        # Vérifier si l'annulation a été demandée
         if self.cancel_requested:
             self.is_transcribing = False
             return
         
-        # Marquer qu'une transcription est en cours
         self.is_transcribing = True
         
         try:
@@ -1896,12 +1760,10 @@ class VoiceTranscriptionApp:
                     self.root.after(0, lambda: self._reset_ui("Aucun audio enregistré"))
                 return
             
-            # Sauvegarder dans un fichier temporaire
             temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.wav')
             temp_filename = temp_file.name
             temp_file.close()
             
-            # Écrire le fichier WAV
             wf = wave.open(temp_filename, 'wb')
             wf.setnchannels(self.CHANNELS)
             wf.setsampwidth(2)  # 16-bit = 2 bytes
@@ -1909,17 +1771,14 @@ class VoiceTranscriptionApp:
             wf.writeframes(b''.join(self.audio_frames))
             wf.close()
             
-            # Vérifier si l'annulation a été demandée avant de lancer l'API
             if self.cancel_requested:
                 os.unlink(temp_filename)
                 self.is_transcribing = False
                 return
 
-            # Transcrit avec OpenAI
             self.root.after(0, lambda: self.status_label.config(text="🔄 Transcription en cours...", fg="blue"))
             
-            # Note: Une fois l'appel API lancé, on ne peut pas l'annuler facilement
-            # Mais on peut éviter de lancer l'appel si cancel_requested est True
+            # Une fois l'appel API lancé, il n'est plus annulable.
             model_used = self.selected_model
             with open(temp_filename, 'rb') as audio_file:
                 transcript = self.client.audio.transcriptions.create(
@@ -1928,7 +1787,6 @@ class VoiceTranscriptionApp:
                     language="fr"
                 )
 
-            # Vérifier à nouveau après l'appel
             if self.cancel_requested:
                 os.unlink(temp_filename)
                 self.is_transcribing = False
@@ -1936,12 +1794,10 @@ class VoiceTranscriptionApp:
 
             text = transcript.text
 
-            # Nettoyer le fichier temporaire
             os.unlink(temp_filename)
 
-            # Mise à jour du suivi des coûts (uniquement sur transcription réussie).
-            # Calcul de la durée à partir des bytes réels (plus fiable avec InputStream
-            # dont la taille de bloc est variable) : bytes / 2 (int16) / taux = secondes.
+            # Durée calculée depuis les octets réels (InputStream a une taille de
+            # bloc variable) : octets / 2 (int16) / taux d'échantillonnage.
             total_bytes = sum(len(f) for f in self.audio_frames)
             audio_duration_seconds = total_bytes / 2 / self.RATE
             cost, exact = compute_transcription_cost(
@@ -1952,7 +1808,6 @@ class VoiceTranscriptionApp:
             self._log_transcription(model_used, audio_duration_seconds, cost, exact)
             self.root.after(0, self._update_session_display)
 
-            # Afficher le texte dans l'interface
             self.root.after(0, lambda: self._display_text(text))
             
         except Exception as e:
@@ -1970,11 +1825,9 @@ class VoiceTranscriptionApp:
         - les deux              → texte collé ET conservé dans le presse-papier
         - aucun                 → texte uniquement visible dans la zone de transcription
         """
-        # Ajouter le texte à la zone de texte
         self.text_area.insert(tk.END, text + "\n\n")
         self.text_area.see(tk.END)
 
-        # Réinitialiser l'historique après une nouvelle transcription
         self.text_history = []
         self.history_index = -1
 
@@ -1997,11 +1850,8 @@ class VoiceTranscriptionApp:
             try:
                 pyperclip.copy(text)
                 time.sleep(0.15)
-                # Utiliser Ctrl+Maj+V si :
-                #  - l'option manuelle est activée (utile pour terminaux intégrés
-                #    type Cursor/VS Code où la détection par classe de fenêtre échoue)
-                #  - OU si la fenêtre active est un terminal connu (Windows Terminal,
-                #    cmd classique, PuTTY, mintty…)
+                # Ctrl+Maj+V si le toggle manuel est actif (terminaux intégrés type
+                # Cursor) ou si la fenêtre active est un terminal connu.
                 if self.terminal_paste_var.get() or self._is_terminal_window_focused():
                     pyautogui.hotkey('ctrl', 'shift', 'v')
                 else:
@@ -2032,17 +1882,14 @@ class VoiceTranscriptionApp:
                 status_text = "✅ Transcription terminée (copie échouée)"
                 status_color = "orange"
 
-        # Son de fin + status
         self.play_sound('end.wav')
         self._reset_ui(status_text)
         self.status_label.config(text=status_text, fg=status_color)
 
-        # Overlay flottant : flash bref pour confirmer le résultat
         if hasattr(self, 'overlay'):
             overlay_bg = "#2e7d32" if status_color == "green" else "#ff9800"
             self.overlay.show_briefly(status_text, bg=overlay_bg, duration_ms=1800)
 
-        # Marquer que la transcription est terminée
         self.is_transcribing = False
     
     def _reset_ui(self, status_text="Prêt"):
@@ -2053,7 +1900,6 @@ class VoiceTranscriptionApp:
             activebackground="#45a049",
             state=tk.NORMAL
         )
-        # Cacher le bouton Annuler
         self.cancel_button.pack_forget()
         
         self.status_label.config(text=status_text, fg="gray")
@@ -2064,12 +1910,10 @@ class VoiceTranscriptionApp:
     
     def clear_text(self):
         """Efface le contenu de la zone de texte"""
-        # Sauvegarder dans l'historique avant d'effacer
         current_text = self.text_area.get(1.0, tk.END).strip()
         if current_text:
             self.text_history.append(current_text)
             self.history_index = len(self.text_history) - 1
-            # Limiter l'historique à 10 entrées
             if len(self.text_history) > 10:
                 self.text_history.pop(0)
                 self.history_index = len(self.text_history) - 1
@@ -2080,27 +1924,23 @@ class VoiceTranscriptionApp:
     
     def undo_clear(self, event=None):
         """Restaure le texte précédemment effacé (Ctrl+Z)"""
-        # Vérifier si on a un historique
         if len(self.text_history) == 0:
             return None
         
-        # Vérifier si la zone est vide ou presque vide
         current_text = self.text_area.get(1.0, tk.END).strip()
         
-        # Si la zone est vide, restaurer le dernier texte effacé
         if not current_text and self.history_index >= 0:
             restored_text = self.text_history[self.history_index]
             self.text_area.delete(1.0, tk.END)
             self.text_area.insert(1.0, restored_text)
             self.status_label.config(text="↩️ Texte restauré", fg="green")
             self.root.after(2000, lambda: self.status_label.config(text="Prêt", fg="gray"))
-            # Décrémenter l'index pour pouvoir restaurer plusieurs fois
             self.history_index -= 1
             if self.history_index < 0:
                 self.history_index = -1
             return "break"  # Empêcher le comportement par défaut de Ctrl+Z
         
-        return "break"  # Toujours empêcher le comportement par défaut
+        return "break"
     
     def copy_to_clipboard(self):
         """Copie le contenu de la zone de texte dans le presse-papier"""
@@ -2120,11 +1960,7 @@ class VoiceTranscriptionApp:
         return "⌨️ %s (global) — Échap pour annuler" % describe_hotkey(self.hotkey)
 
     def _apply_hotkey(self, hotkey):
-        """Enregistre un nouveau raccourci et rafraîchit les affichages.
-
-        Le listener relit `self.hotkey` à chaque frappe : aucun redémarrage du
-        thread clavier n'est nécessaire.
-        """
+        """Enregistre un nouveau raccourci et rafraîchit les affichages."""
         self.hotkey = hotkey
         self._save_prefs()
         if hasattr(self, 'hotkey_label'):
@@ -2132,14 +1968,27 @@ class VoiceTranscriptionApp:
         if hasattr(self, 'hotkey_pref_label'):
             self.hotkey_pref_label.config(text=describe_hotkey(hotkey))
 
-    def _hotkey_matches(self, vk, held):
-        """Le raccourci courant est-il déclenché par `vk` avec les modificateurs `held` ?
+    def _accept_hotkey_press(self):
+        """Filtre les répétitions du système : seule une transition relâché → enfoncé bascule."""
+        now = time.monotonic()
+        is_repeat = self._hotkey_down and (now - self._hotkey_last_press) < HOTKEY_REPEAT_GAP
+        self._hotkey_last_press = now
+        self._hotkey_down = True
 
-        Quand le raccourci comporte des modificateurs, on exige qu'ils soient tous
-        enfoncés sans interdire les autres : certains logiciels de macro ajoutent
-        Maj à la combinaison qu'ils émettent. Un raccourci sans modificateur n'est
-        en revanche accepté que si aucun modificateur n'est enfoncé, sinon il
-        capterait toutes les combinaisons bâties sur cette touche.
+        if is_repeat:
+            return False
+        if now - self._hotkey_last_toggle < HOTKEY_MIN_INTERVAL:
+            return False
+
+        self._hotkey_last_toggle = now
+        return True
+
+    def _hotkey_matches(self, vk, held):
+        """Le raccourci est-il déclenché par `vk` avec les modificateurs `held` ?
+
+        Les modificateurs requis doivent être enfoncés sans que les autres soient exclus,
+        certaines macros ajoutant Maj. Sans modificateur requis, tout modificateur enfoncé
+        disqualifie la frappe.
         """
         if vk not in self.hotkey['vks']:
             return False
@@ -2149,15 +1998,8 @@ class VoiceTranscriptionApp:
     def setup_global_hotkey(self):
         """Écoute le clavier globalement : raccourci d'enregistrement + Échap.
 
-        On suit les modificateurs à la main plutôt que d'utiliser `GlobalHotKeys`,
-        sensible à l'ordre et au rythme d'arrivée des touches : les frappes émises
-        par un logiciel de macro (souris programmable, pédale, StreamDeck) arrivent
-        parfois en quelques millisecondes et peuvent le prendre à défaut. Le suivi
-        manuel accepte n'importe quel ordre de pression.
-
-        L'écoute se fait au niveau du système, donc l'origine matérielle de la
-        frappe est indifférente : une touche tapée au doigt et une touche émise
-        par une macro produisent le même événement.
+        Suivi manuel des modificateurs plutôt que `GlobalHotKeys`, sensible à l'ordre et
+        au rythme d'arrivée des touches qu'une macro peut émettre en quelques millisecondes.
         """
         held = set()
 
@@ -2170,8 +2012,7 @@ class VoiceTranscriptionApp:
                         self.root.after(0, self._on_capture_modifiers, frozenset(held))
                     return
 
-                # Fenêtre de capture ouverte : toute touche lui est destinée, ce
-                # qui neutralise au passage le raccourci courant pendant l'essai.
+                # Neutralise le raccourci courant pendant l'essai.
                 if self._hotkey_capture is not None:
                     if key == pynput_keyboard.Key.esc:
                         self.root.after(0, self._close_hotkey_dialog)
@@ -2188,7 +2029,8 @@ class VoiceTranscriptionApp:
 
                 vk = getattr(key, 'vk', None)
                 if vk is not None and self._hotkey_matches(vk, held):
-                    self.root.after(0, self.toggle_recording)
+                    if self._accept_hotkey_press():
+                        self.root.after(0, self.toggle_recording)
             except Exception:
                 pass
 
@@ -2197,6 +2039,11 @@ class VoiceTranscriptionApp:
                 modifier = MODIFIER_NAMES.get(key)
                 if modifier:
                     held.discard(modifier)
+                    return
+
+                vk = getattr(key, 'vk', None)
+                if vk is not None and vk in self.hotkey['vks']:
+                    self._hotkey_down = False
             except Exception:
                 pass
 
@@ -2213,13 +2060,8 @@ class VoiceTranscriptionApp:
             print("💡 Essayez de lancer l'application en tant qu'administrateur")
 
     def _open_hotkey_dialog(self):
-        """Capture une nouvelle combinaison au clavier.
-
-        Les modificateurs ne valident jamais : ils s'accumulent et alimentent
-        l'aperçu. C'est la première touche normale qui fige la combinaison, avec
-        les modificateurs enfoncés à cet instant — l'ordre de pression est donc
-        sans importance.
-        """
+        """Capture une combinaison : les modificateurs s'accumulent, la première touche
+        normale la fige — l'ordre de pression est donc sans importance."""
         if self._hotkey_capture is not None:
             return
 
@@ -2331,7 +2173,6 @@ class VoiceTranscriptionApp:
         except Exception:
             pass
 
-
 def acquire_single_instance_lock():
     """Retourne le socket verrou, ou None si l'app tourne déjà (et la ramène au premier plan)."""
     lock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -2349,7 +2190,6 @@ def acquire_single_instance_lock():
             pass
         return None
 
-
 def serve_single_instance_lock(lock, app):
     """Ré-affiche la fenêtre quand un second lancement se signale."""
     def boucle():
@@ -2363,7 +2203,6 @@ def serve_single_instance_lock(lock, app):
 
     threading.Thread(target=boucle, daemon=True).start()
 
-
 def main():
     lock = acquire_single_instance_lock()
     if lock is None:
@@ -2374,11 +2213,8 @@ def main():
     app = VoiceTranscriptionApp(root)
     serve_single_instance_lock(lock, app)
 
-    # Le X de la fenêtre réduit dans la tray (si disponible), sinon quitte.
-    # Pour réellement quitter, utiliser le menu clic-droit de la tray.
     root.protocol("WM_DELETE_WINDOW", app._hide_to_tray)
 
-    # Démarrer la boucle principale
     root.mainloop()
 
 if __name__ == '__main__':
