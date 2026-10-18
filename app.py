@@ -25,6 +25,8 @@ from pynput import keyboard as pynput_keyboard
 import pygame
 import pyautogui
 
+from local_engine import NemotronEngine, MODEL_ID as LOCAL_MODEL, missing_requirement
+
 # Sans ça, les emojis des prints crashent une console Windows en cp1252.
 for flux in (sys.stdout, sys.stderr):
     if flux is not None:
@@ -40,6 +42,7 @@ MODEL_OPTIONS = [
     ("GPT-4o Transcribe", "gpt-4o-transcribe"),
     ("GPT-4o Mini Transcribe", "gpt-4o-mini-transcribe"),
     ("Whisper-1", "whisper-1"),
+    ("Nemotron 3.5 local (Handy)", LOCAL_MODEL),
 ]
 
 # Tarifs OpenAI. "duration" = prix ferme par minute, "tokens" = prix par million
@@ -59,6 +62,7 @@ MODEL_PRICING = {
     "whisper-1": {
         "mode": "duration", "per_minute": 0.006, "est_per_minute": 0.006,
     },
+    LOCAL_MODEL: {"mode": "local", "est_per_minute": 0.0},
 }
 
 def compute_transcription_cost(model, usage, duration_sec):
@@ -66,6 +70,8 @@ def compute_transcription_cost(model, usage, duration_sec):
     pricing = MODEL_PRICING.get(model)
     if pricing is None:
         return 0.0, False
+    if pricing["mode"] == "local":
+        return 0.0, True
 
     usage_type = getattr(usage, "type", None)
     try:
@@ -544,7 +550,9 @@ class VoiceTranscriptionApp:
         self.audio_frames = []
         self.recording_thread = None
         self.recording_start_time = None
+        self.recording_model = None
         self.selected_device_index = None
+        self.local_engine = NemotronEngine(language="fr-FR")
 
         self.prefs = self._load_prefs()
 
@@ -798,7 +806,8 @@ class VoiceTranscriptionApp:
             "• GPT Transcribe — 0,0045 $ ferme (précision la plus haute)\n"
             "• GPT-4o Transcribe — ≈ 0,0033 $ aux tokens\n"
             "• GPT-4o Mini Transcribe — ≈ 0,0016 $ aux tokens\n"
-            "• Whisper-1 — 0,006 $ ferme (ancienne génération)\n\n"
+            "• Whisper-1 — 0,006 $ ferme (ancienne génération)\n"
+            "• Nemotron 3.5 local (Handy) — gratuit, sur l'ordinateur, sans clé API\n\n"
             "Les modèles aux tokens varient selon la densité de parole ; "
             "le compteur ci-dessous utilise le coût réel renvoyé par l'API.",
             wraplength=280
@@ -1151,6 +1160,12 @@ class VoiceTranscriptionApp:
         self.model_var.set(label)
         self._save_prefs()
         print(f"Modèle changé: {label} ({api_name})")
+        if api_name == LOCAL_MODEL:
+            problem = missing_requirement()
+            if problem:
+                messagebox.showwarning("Modèle local", problem)
+            else:
+                self.local_engine.preload()
 
     def _deferred_init(self):
         """Initialisations lourdes différées pour accélérer l'apparition de la fenêtre"""
@@ -1161,6 +1176,9 @@ class VoiceTranscriptionApp:
 
         self.setup_global_hotkey()
         self._setup_tray()
+
+        if self.selected_model == LOCAL_MODEL and missing_requirement() is None:
+            self.local_engine.preload()
 
     def _make_tray_icon_image(self):
         """Génère programmatiquement l'icône de la tray (évite de shipper un binaire)."""
@@ -1617,7 +1635,12 @@ class VoiceTranscriptionApp:
             return
 
         if not self.is_recording:
-            if self.client is None:
+            if self.selected_model == LOCAL_MODEL:
+                problem = missing_requirement()
+                if problem:
+                    messagebox.showerror("Modèle local", problem)
+                    return
+            elif self.client is None:
                 messagebox.showwarning(
                     "Clé API manquante",
                     "Configurez votre clé API OpenAI dans les options "
@@ -1659,7 +1682,11 @@ class VoiceTranscriptionApp:
         self.cancel_requested = False
         self.audio_frames = []
         self.recording_start_time = time.time()
-        
+        # Le modèle local transcrit pendant l'enregistrement : il reçoit le son au fil de l'eau.
+        self.recording_model = self.selected_model
+        if self.recording_model == LOCAL_MODEL:
+            self.local_engine.begin(self.RATE)
+
         self.play_sound('start.wav')
         
         self.record_button.config(
@@ -1681,6 +1708,8 @@ class VoiceTranscriptionApp:
             self.is_recording = False
             self.cancel_requested = True
             self.audio_frames = []
+            if self.recording_model == LOCAL_MODEL:
+                self.local_engine.cancel()
             self.play_sound('error.wav', volume=0.3)
             self._reset_ui("Enregistrement annulé")
             self.status_label.config(text="❌ Enregistrement annulé", fg="orange")
@@ -1714,11 +1743,15 @@ class VoiceTranscriptionApp:
         `sd.rec() + sd.wait()` qui laissait passer ~10-20ms entre chaque chunk.
         """
         device = self.selected_device_index if self.selected_device_index is not None else None
+        local = self.recording_model == LOCAL_MODEL
 
         def audio_callback(indata, frames, time_info, status):
             # `indata` est un buffer numpy réutilisé — on copie avant de stocker.
             if self.is_recording and not self.cancel_requested:
-                self.audio_frames.append(indata.copy().tobytes())
+                chunk = indata.copy().tobytes()
+                self.audio_frames.append(chunk)
+                if local:
+                    self.local_engine.feed(chunk)
 
         try:
             # blocksize=0 laisse PortAudio choisir la taille optimale pour le périphérique.
@@ -1754,12 +1787,19 @@ class VoiceTranscriptionApp:
         self.is_transcribing = True
         
         try:
+            model_used = self.recording_model
             if not self.audio_frames or self.cancel_requested:
                 self.is_transcribing = False
+                if model_used == LOCAL_MODEL:
+                    self.local_engine.cancel()
                 if not self.cancel_requested:
                     self.root.after(0, lambda: self._reset_ui("Aucun audio enregistré"))
                 return
-            
+
+            if model_used == LOCAL_MODEL:
+                self._finish_local_transcription()
+                return
+
             temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.wav')
             temp_filename = temp_file.name
             temp_file.close()
@@ -1779,7 +1819,6 @@ class VoiceTranscriptionApp:
             self.root.after(0, lambda: self.status_label.config(text="🔄 Transcription en cours...", fg="blue"))
             
             # Une fois l'appel API lancé, il n'est plus annulable.
-            model_used = self.selected_model
             with open(temp_filename, 'rb') as audio_file:
                 transcript = self.client.audio.transcriptions.create(
                     model=model_used,
@@ -1816,6 +1855,16 @@ class VoiceTranscriptionApp:
             self.root.after(0, lambda: messagebox.showerror("Erreur", error_msg))
             self.root.after(0, lambda: self._reset_ui("Erreur"))
     
+    def _finish_local_transcription(self):
+        """Récupère le texte du modèle local, qui a transcrit pendant l'enregistrement."""
+        self.root.after(0, lambda: self.status_label.config(text="🔄 Transcription en cours...", fg="blue"))
+        text = self.local_engine.finish()
+        audio_duration_seconds = sum(len(f) for f in self.audio_frames) / 2 / self.RATE
+        self.session_transcriptions += 1
+        self._log_transcription(LOCAL_MODEL, audio_duration_seconds, 0.0, True)
+        self.root.after(0, self._update_session_display)
+        self.root.after(0, lambda: self._display_text(text))
+
     def _display_text(self, text):
         """Affiche le texte transcrit et gère copie/collage selon les toggles utilisateur.
 

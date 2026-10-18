@@ -30,7 +30,7 @@ Le raccourci est écouté au niveau du système, en amont des applications. Wind
 ## Fonctionnalités
 
 ### Transcription
-- Quatre modèles au choix, persistés entre sessions :
+- Cinq modèles au choix, persistés entre sessions :
 
   | Modèle | Facturation | Coût par minute |
   |---|---|---|
@@ -38,6 +38,7 @@ Le raccourci est écouté au niveau du système, en amont des applications. Wind
   | **GPT-4o Transcribe** | tokens (2,50 $ / 10,00 $ par 1M) | ≈ 0,0033 $ |
   | **GPT-4o Mini Transcribe** | tokens (1,25 $ / 5,00 $ par 1M) | ≈ 0,0016 $ |
   | **Whisper-1** (ancienne génération) | durée | 0,006 $ ferme |
+  | **Nemotron 3.5 local (Handy)** | aucune, sur l'ordinateur | 0 $ |
 
   Les coûts par minute des modèles GPT-4o sont mesurés sur une minute de dictée
   française continue (≈ 600 tokens audio en entrée + ≈ 180 tokens de texte en sortie) ;
@@ -50,6 +51,19 @@ Le raccourci est écouté au niveau du système, en amont des applications. Wind
   Transcribe est le moins cher de la liste et transcrit très fidèlement, en gardant
   les hésitations et les répétitions telles quelles. Le choix dépend donc de ce que
   vous faites du texte : dictée à retravailler ensuite ou texte directement lisible.
+- **Nemotron 3.5 local** est le modèle de [Handy](https://handy.computer) (Nemotron 3.5 ASR
+  Streaming 0.6B, quantifié Q8), exécuté par le même moteur, transcribe.cpp : sur la carte
+  graphique via Vulkan quand elle est disponible, sinon sur le processeur. Aucune clé API,
+  aucun envoi de son. Le son est transcrit pendant l'enregistrement, si bien que le texte arrive
+  une fraction de seconde après l'arrêt, quelle que soit la durée de la dictée. Le modèle est
+  chargé au démarrage quand il est sélectionné et libéré après 10 minutes sans usage, comme
+  dans Handy.
+
+  Le fichier du modèle (≈ 720 Mo) est lu là où Handy l'a téléchargé, dans le cache Hugging Face
+  (`~/.cache/huggingface/hub`). Sans Handy, téléchargez
+  [nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf](https://huggingface.co/handy-computer/nemotron-3.5-asr-streaming-0.6b-gguf/resolve/main/nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf)
+  dans un dossier `models` à côté de `app.py`, ou indiquez son chemin dans la variable
+  d'environnement `NEMOTRON_MODEL`.
 - Les modèles `gpt-live-transcribe` et `gpt-realtime-whisper` ne sont pas proposés : ils
   n'existent que sur les sessions Realtime WebSocket et renvoient 404 sur
   `v1/audio/transcriptions`, l'endpoint fichier utilisé ici.
@@ -93,6 +107,7 @@ Le raccourci est écouté au niveau du système, en amont des applications. Wind
 Installées par `setup.bat`. Principales :
 
 - `openai`, `python-dotenv` — API OpenAI + gestion `.env`
+- `transcribe-cpp`, `soxr` — modèle local (moteur de Handy) et rééchantillonnage du micro à 16 kHz
 - `sounddevice`, `numpy` — capture audio
 - `pynput` — raccourci clavier global
 - `pyperclip`, `pyautogui` — presse-papier + injection de frappes
@@ -104,6 +119,7 @@ Voir `requirements.txt` pour les versions.
 ## Fichiers
 
 - `app.py` — application principale
+- `local_engine.py` — transcription locale par Nemotron
 - `.env` — clé API (non versionné)
 - `sounds/` — sons de feedback
 - `transcription_history.json` — historique des transcriptions (local, non versionné)
@@ -113,7 +129,7 @@ Voir `requirements.txt` pour les versions.
 
 ## Notes
 
-Clé API OpenAI requise, facturée à votre compte selon l'usage. Les tarifs ci-dessus sont indicatifs et peuvent évoluer — voir [platform.openai.com/pricing](https://platform.openai.com/pricing) pour les prix en vigueur.
+Clé API OpenAI requise pour les modèles OpenAI, facturée à votre compte selon l'usage ; le modèle local s'en passe. Les tarifs ci-dessus sont indicatifs et peuvent évoluer — voir [platform.openai.com/pricing](https://platform.openai.com/pricing) pour les prix en vigueur.
 
 ## Contribuer
 

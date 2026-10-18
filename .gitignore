@@ -38,3 +38,5 @@ dist/
 # OS
 .DS_Store
 Thumbs.db
+# Modèles de transcription locaux placés à la main
+models/
