@@ -30,7 +30,7 @@ Le raccourci est écouté au niveau du système, en amont des applications. Wind
 ## Fonctionnalités
 
 ### Transcription
-- Cinq modèles au choix, persistés entre sessions :
+- Neuf modèles au choix, persistés entre sessions :
 
   | Modèle | Facturation | Coût par minute |
   |---|---|---|
@@ -38,7 +38,7 @@ Le raccourci est écouté au niveau du système, en amont des applications. Wind
   | **GPT-4o Transcribe** | tokens (2,50 $ / 10,00 $ par 1M) | ≈ 0,0033 $ |
   | **GPT-4o Mini Transcribe** | tokens (1,25 $ / 5,00 $ par 1M) | ≈ 0,0016 $ |
   | **Whisper-1** (ancienne génération) | durée | 0,006 $ ferme |
-  | **Nemotron 3.5 local (Handy)** | aucune, sur l'ordinateur | 0 $ |
+  | **Nemotron 3.5**, **Qwen3-ASR 1.7B**, **Whisper large-v3 turbo**, **Granite Speech 4.1 2B**, **Parakeet TDT 0.6B v3** (locaux) | aucune, sur l'ordinateur | 0 $ |
 
   Les coûts par minute des modèles GPT-4o sont mesurés sur une minute de dictée
   française continue (≈ 600 tokens audio en entrée + ≈ 180 tokens de texte en sortie) ;
@@ -51,19 +51,27 @@ Le raccourci est écouté au niveau du système, en amont des applications. Wind
   Transcribe est le moins cher de la liste et transcrit très fidèlement, en gardant
   les hésitations et les répétitions telles quelles. Le choix dépend donc de ce que
   vous faites du texte : dictée à retravailler ensuite ou texte directement lisible.
-- **Nemotron 3.5 local** est le modèle de [Handy](https://handy.computer) (Nemotron 3.5 ASR
-  Streaming 0.6B, quantifié Q8), exécuté par le même moteur, transcribe.cpp : sur la carte
-  graphique via Vulkan quand elle est disponible, sinon sur le processeur. Aucune clé API,
-  aucun envoi de son. Le son est transcrit pendant l'enregistrement, si bien que le texte arrive
-  une fraction de seconde après l'arrêt, quelle que soit la durée de la dictée. Le modèle est
-  chargé au démarrage quand il est sélectionné et libéré après 10 minutes sans usage, comme
-  dans Handy.
+- **Les modèles locaux** tournent avec le moteur de [Handy](https://handy.computer),
+  transcribe.cpp : sur la carte graphique via Vulkan quand elle est disponible, sinon sur le
+  processeur. Aucune clé API, aucun envoi de son. Un seul modèle est chargé à la fois : il l'est
+  au démarrage quand il est sélectionné, et libéré après 10 minutes sans usage, comme dans Handy.
 
-  Le fichier du modèle (≈ 720 Mo) est lu là où Handy l'a téléchargé, dans le cache Hugging Face
-  (`~/.cache/huggingface/hub`). Sans Handy, téléchargez
-  [nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf](https://huggingface.co/handy-computer/nemotron-3.5-asr-streaming-0.6b-gguf/resolve/main/nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf)
-  dans un dossier `models` à côté de `app.py`, ou indiquez son chemin dans la variable
-  d'environnement `NEMOTRON_MODEL`.
+  | Modèle local | Fichier (Q8_0) | Transcription |
+  |---|---|---|
+  | Nemotron 3.5 ASR Streaming 0.6B | [≈ 720 Mo](https://huggingface.co/handy-computer/nemotron-3.5-asr-streaming-0.6b-gguf/resolve/main/nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf) | pendant l'enregistrement |
+  | Qwen3-ASR 1.7B | [≈ 2,2 Go](https://huggingface.co/handy-computer/Qwen3-ASR-1.7B-gguf/resolve/main/Qwen3-ASR-1.7B-Q8_0.gguf) | à l'arrêt |
+  | Whisper large-v3 turbo | [≈ 890 Mo](https://huggingface.co/handy-computer/whisper-large-v3-turbo-gguf/resolve/main/whisper-large-v3-turbo-Q8_0.gguf) | à l'arrêt |
+  | Granite Speech 4.1 2B | [≈ 2,6 Go](https://huggingface.co/handy-computer/granite-speech-4.1-2b-gguf/resolve/main/granite-speech-4.1-2b-Q8_0.gguf) | à l'arrêt, 6 minutes au plus |
+  | Parakeet TDT 0.6B v3 | [≈ 740 Mo](https://huggingface.co/handy-computer/parakeet-tdt-0.6b-v3-gguf/resolve/main/parakeet-tdt-0.6b-v3-Q8_0.gguf) | à l'arrêt |
+
+  Nemotron transcrit pendant que vous parlez : le texte arrive une fraction de seconde après
+  l'arrêt, quelle que soit la durée de la dictée. Les autres transcrivent tout d'un bloc à
+  l'arrêt ; sur une RTX 3080, 20 secondes de dictée prennent de 0,2 s (Parakeet) à 0,8 s
+  (Granite).
+
+  Chaque fichier est lu dans le cache Hugging Face (`~/.cache/huggingface/hub`) quand Handy l'a
+  téléchargé, sinon dans un dossier `models` à côté de `app.py` : y déposer les fichiers liés
+  ci-dessus.
 - Les modèles `gpt-live-transcribe` et `gpt-realtime-whisper` ne sont pas proposés : ils
   n'existent que sur les sessions Realtime WebSocket et renvoient 404 sur
   `v1/audio/transcriptions`, l'endpoint fichier utilisé ici.
@@ -80,7 +88,8 @@ Le raccourci est écouté au niveau du système, en amont des applications. Wind
 - Désactivable dans les options
 
 ### Copie et collage
-- **Copier dans le presse-papier** et **Coller dans le champ actif** sont deux options indépendantes. Coller sans copier est possible : le contenu d'origine du presse-papier est restauré après le collage.
+- **Copier dans le presse-papier** et **Coller dans le champ actif** sont deux options indépendantes. Coller sans copier est possible : le contenu d'origine du presse-papier, image ou fichiers compris, est restauré une seconde après le collage, sauf si autre chose y a été copié entre-temps.
+- Le collage attend que les touches du raccourci soient relâchées : tenues, elles changeraient `Ctrl+V` en un autre raccourci. Au-delà de 2 secondes, le texte reste dans le presse-papier sans être collé.
 - Détection automatique des terminaux natifs (Windows Terminal, cmd, PuTTY, mintty) → `Ctrl+Maj+V` au lieu de `Ctrl+V`
 - Toggle manuel **« Coller pour terminal »** pour les terminaux intégrés (Cursor, VS Code…) qui partagent la classe de fenêtre de leur éditeur et ne sont pas détectables automatiquement
 
@@ -119,7 +128,9 @@ Voir `requirements.txt` pour les versions.
 ## Fichiers
 
 - `app.py` — application principale
-- `local_engine.py` — transcription locale par Nemotron
+- `local_engine.py` — transcription locale (modèles et moteur)
+- `clipboard.py` — sauvegarde et restauration du presse-papier dans tous ses formats
+- `models/` — fichiers des modèles locaux téléchargés à la main (non versionné)
 - `.env` — clé API (non versionné)
 - `sounds/` — sons de feedback
 - `transcription_history.json` — historique des transcriptions (local, non versionné)

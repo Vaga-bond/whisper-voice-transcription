@@ -25,7 +25,8 @@ from pynput import keyboard as pynput_keyboard
 import pygame
 import pyautogui
 
-from local_engine import NemotronEngine, MODEL_ID as LOCAL_MODEL, missing_requirement
+import clipboard
+from local_engine import LocalEngine, LOCAL_MODELS, missing_requirement
 
 # Sans ça, les emojis des prints crashent une console Windows en cp1252.
 for flux in (sys.stdout, sys.stderr):
@@ -42,7 +43,7 @@ MODEL_OPTIONS = [
     ("GPT-4o Transcribe", "gpt-4o-transcribe"),
     ("GPT-4o Mini Transcribe", "gpt-4o-mini-transcribe"),
     ("Whisper-1", "whisper-1"),
-    ("Nemotron 3.5 local (Handy)", LOCAL_MODEL),
+    *[(spec.label, model_id) for model_id, spec in LOCAL_MODELS.items()],
 ]
 
 # Tarifs OpenAI. "duration" = prix ferme par minute, "tokens" = prix par million
@@ -62,7 +63,7 @@ MODEL_PRICING = {
     "whisper-1": {
         "mode": "duration", "per_minute": 0.006, "est_per_minute": 0.006,
     },
-    LOCAL_MODEL: {"mode": "local", "est_per_minute": 0.0},
+    **{model_id: {"mode": "local", "est_per_minute": 0.0} for model_id in LOCAL_MODELS},
 }
 
 def compute_transcription_cost(model, usage, duration_sec):
@@ -561,7 +562,7 @@ class VoiceTranscriptionApp:
         self.recording_start_time = None
         self.recording_model = None
         self.selected_device_index = None
-        self.local_engine = NemotronEngine(language="fr-FR")
+        self.local_engine = LocalEngine(language="fr")
 
         self.prefs = self._load_prefs()
 
@@ -816,7 +817,8 @@ class VoiceTranscriptionApp:
             "• GPT-4o Transcribe — ≈ 0,0033 $ aux tokens\n"
             "• GPT-4o Mini Transcribe — ≈ 0,0016 $ aux tokens\n"
             "• Whisper-1 — 0,006 $ ferme (ancienne génération)\n"
-            "• Nemotron 3.5 local (Handy) — gratuit, sur l'ordinateur, sans clé API\n\n"
+            "• Modèles « local » — gratuits, sur l'ordinateur, sans clé API. Nemotron "
+            "transcrit pendant que vous parlez, les autres à l'arrêt.\n\n"
             "Les modèles aux tokens varient selon la densité de parole ; "
             "le compteur ci-dessous utilise le coût réel renvoyé par l'API.",
             wraplength=280
@@ -1169,12 +1171,12 @@ class VoiceTranscriptionApp:
         self.model_var.set(label)
         self._save_prefs()
         print(f"Modèle changé: {label} ({api_name})")
-        if api_name == LOCAL_MODEL:
-            problem = missing_requirement()
+        if api_name in LOCAL_MODELS:
+            problem = missing_requirement(self.selected_model)
             if problem:
                 messagebox.showwarning("Modèle local", problem)
             else:
-                self.local_engine.preload()
+                self.local_engine.preload(self.selected_model)
 
     def _deferred_init(self):
         """Initialisations lourdes différées pour accélérer l'apparition de la fenêtre"""
@@ -1186,8 +1188,8 @@ class VoiceTranscriptionApp:
         self.setup_global_hotkey()
         self._setup_tray()
 
-        if self.selected_model == LOCAL_MODEL and missing_requirement() is None:
-            self.local_engine.preload()
+        if self.selected_model in LOCAL_MODELS and missing_requirement(self.selected_model) is None:
+            self.local_engine.preload(self.selected_model)
 
     def _make_tray_icon_image(self):
         """Génère programmatiquement l'icône de la tray (évite de shipper un binaire)."""
@@ -1644,8 +1646,8 @@ class VoiceTranscriptionApp:
             return
 
         if not self.is_recording:
-            if self.selected_model == LOCAL_MODEL:
-                problem = missing_requirement()
+            if self.selected_model in LOCAL_MODELS:
+                problem = missing_requirement(self.selected_model)
                 if problem:
                     messagebox.showerror("Modèle local", problem)
                     return
@@ -1693,8 +1695,8 @@ class VoiceTranscriptionApp:
         self.recording_start_time = time.time()
         # Le modèle local transcrit pendant l'enregistrement : il reçoit le son au fil de l'eau.
         self.recording_model = self.selected_model
-        if self.recording_model == LOCAL_MODEL:
-            self.local_engine.begin(self.RATE)
+        if self.recording_model in LOCAL_MODELS:
+            self.local_engine.begin(self.recording_model, self.RATE)
 
         self.play_sound('start.wav')
         
@@ -1717,7 +1719,7 @@ class VoiceTranscriptionApp:
             self.is_recording = False
             self.cancel_requested = True
             self.audio_frames = []
-            if self.recording_model == LOCAL_MODEL:
+            if self.recording_model in LOCAL_MODELS:
                 self.local_engine.cancel()
             self.play_sound('error.wav', volume=0.3)
             self._reset_ui("Enregistrement annulé")
@@ -1752,7 +1754,7 @@ class VoiceTranscriptionApp:
         `sd.rec() + sd.wait()` qui laissait passer ~10-20ms entre chaque chunk.
         """
         device = self.selected_device_index if self.selected_device_index is not None else None
-        local = self.recording_model == LOCAL_MODEL
+        local = self.recording_model in LOCAL_MODELS
 
         def audio_callback(indata, frames, time_info, status):
             # `indata` est un buffer numpy réutilisé — on copie avant de stocker.
@@ -1799,13 +1801,13 @@ class VoiceTranscriptionApp:
             model_used = self.recording_model
             if not self.audio_frames or self.cancel_requested:
                 self.is_transcribing = False
-                if model_used == LOCAL_MODEL:
+                if model_used in LOCAL_MODELS:
                     self.local_engine.cancel()
                 if not self.cancel_requested:
                     self.root.after(0, lambda: self._reset_ui("Aucun audio enregistré"))
                 return
 
-            if model_used == LOCAL_MODEL:
+            if model_used in LOCAL_MODELS:
                 self._finish_local_transcription()
                 return
 
@@ -1870,7 +1872,7 @@ class VoiceTranscriptionApp:
         text = self.local_engine.finish()
         audio_duration_seconds = sum(len(f) for f in self.audio_frames) / 2 / self.RATE
         self.session_transcriptions += 1
-        self._log_transcription(LOCAL_MODEL, audio_duration_seconds, 0.0, True)
+        self._log_transcription(self.recording_model, audio_duration_seconds, 0.0, True)
         self.root.after(0, self._update_session_display)
         self.root.after(0, lambda: self._display_text(text))
 
@@ -1933,38 +1935,49 @@ class VoiceTranscriptionApp:
         """Injecte le texte dans le champ actif, puis rend l'ancien presse-papier sauf si auto_copy."""
         auto_copy = self.auto_copy_var.get()
         saved_clipboard = None
+        snapshot_error = None
         if not auto_copy:
             try:
-                saved_clipboard = pyperclip.paste()
-            except Exception:
-                saved_clipboard = None
+                saved_clipboard = clipboard.snapshot()
+            except Exception as e:
+                snapshot_error = e
 
         try:
             pyperclip.copy(text)
+            pasted_sequence = clipboard.sequence()
             # Ctrl+Maj+V si le toggle manuel est actif (terminaux intégrés type
             # Cursor) ou si la fenêtre active est un terminal connu.
             if self.terminal_paste_var.get() or self._is_terminal_window_focused():
                 pyautogui.hotkey('ctrl', 'shift', 'v')
             else:
                 pyautogui.hotkey('ctrl', 'v')
-            status_text = "✅ Collé et copié" if auto_copy else "✅ Collé (presse-papier préservé)"
-            status_color = "green"
+            if snapshot_error is not None:
+                print(f"⚠️ Presse-papier non sauvegardé : {snapshot_error}")
+                status_text, status_color = "⚠️ Collé, ancien presse-papier perdu", "orange"
+            elif auto_copy:
+                status_text, status_color = "✅ Collé et copié", "green"
+            else:
+                status_text, status_color = "✅ Collé (presse-papier préservé)", "green"
         except Exception:
             status_text = "✅ Transcription terminée (collage échoué)"
             status_color = "orange"
+            pasted_sequence = None
 
         if saved_clipboard is not None:
             self.root.after(CLIPBOARD_RESTORE_DELAY_MS,
-                            self._restore_clipboard, text, saved_clipboard)
+                            self._restore_clipboard, pasted_sequence, saved_clipboard)
         self._finish_transcription(status_text, status_color)
 
-    def _restore_clipboard(self, pasted, saved):
+    def _restore_clipboard(self, pasted_sequence, saved):
         """Remet l'ancien presse-papier, sauf si autre chose y a été copié entre-temps."""
         try:
-            if pyperclip.paste() == pasted:
-                pyperclip.copy(saved)
-        except Exception:
-            pass
+            if pasted_sequence is None or clipboard.sequence() == pasted_sequence:
+                clipboard.restore(saved)
+        except Exception as e:
+            print(f"⚠️ Presse-papier non rendu : {e}")
+            if hasattr(self, 'overlay'):
+                self.overlay.show_briefly("⚠️ Ancien presse-papier perdu", bg="#ff9800",
+                                          duration_ms=1800)
 
     def _finish_transcription(self, status_text, status_color):
         self.play_sound('end.wav')

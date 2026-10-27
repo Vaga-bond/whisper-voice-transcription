@@ -1,12 +1,14 @@
-"""Transcription locale par Nemotron 3.5 ASR Streaming, le modèle de Handy.
+"""Transcription locale par transcribe.cpp (paquet `transcribe-cpp`), le moteur de Handy.
 
-Le moteur est transcribe.cpp (paquet `transcribe-cpp`), celui qu'utilise Handy : il tourne sur
-la carte graphique via Vulkan quand elle est disponible, sinon sur le processeur. Le fichier du
-modèle est celui que Handy a déjà téléchargé dans le cache Hugging Face.
+Il tourne sur la carte graphique via Vulkan quand elle est disponible, sinon sur le processeur.
+Chaque modèle est un fichier .gguf, lu dans le cache Hugging Face quand Handy l'a téléchargé,
+sinon dans le dossier « models » de l'application.
 
-Le son est transcrit pendant l'enregistrement : à l'arrêt, il ne reste que la fin de la phrase à
-décoder. Toutes les opérations sur le modèle passent par un seul fil d'exécution, qui le charge à
-la demande et le libère après IDLE_UNLOAD secondes sans usage, comme Handy.
+Nemotron transcrit pendant l'enregistrement : à l'arrêt, il ne reste que la fin de la phrase à
+décoder. Les autres modèles ne savent pas transcrire en continu : ils reçoivent le son au fil de
+l'eau et le transcrivent d'un bloc à l'arrêt. Toutes les opérations passent par un seul fil
+d'exécution, qui charge le modèle demandé (en libérant le précédent) et le libère après
+IDLE_UNLOAD secondes sans usage, comme Handy.
 """
 import glob
 import importlib.util
@@ -15,60 +17,101 @@ import queue
 import threading
 import time
 from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 
-MODEL_ID = "nemotron-3.5-local"
-HF_REPO = "handy-computer/nemotron-3.5-asr-streaming-0.6b-gguf"
-MODEL_FILE = "nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf"
-MODEL_URL = f"https://huggingface.co/{HF_REPO}/resolve/main/{MODEL_FILE}"
+
+class LocalModel(NamedTuple):
+    label: str
+    repo: str
+    file: str
+    streaming: bool = False
+
+    @property
+    def url(self):
+        return f"https://huggingface.co/{self.repo}/resolve/main/{self.file}"
+
+
+# Identifiant (préférences, historique) → modèle. Q8_0 partout : la quantification la plus
+# basse qui reste au niveau du modèle d'origine.
+LOCAL_MODELS = {
+    "nemotron-3.5-local": LocalModel(
+        "Nemotron 3.5 local (Handy)", "handy-computer/nemotron-3.5-asr-streaming-0.6b-gguf",
+        "nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf", streaming=True),
+    "qwen3-asr-1.7b-local": LocalModel(
+        "Qwen3-ASR 1.7B local", "handy-computer/Qwen3-ASR-1.7B-gguf",
+        "Qwen3-ASR-1.7B-Q8_0.gguf"),
+    "whisper-large-v3-turbo-local": LocalModel(
+        "Whisper large-v3 turbo local", "handy-computer/whisper-large-v3-turbo-gguf",
+        "whisper-large-v3-turbo-Q8_0.gguf"),
+    "granite-speech-4.1-2b-local": LocalModel(
+        "Granite Speech 4.1 2B local", "handy-computer/granite-speech-4.1-2b-gguf",
+        "granite-speech-4.1-2b-Q8_0.gguf"),
+    "parakeet-tdt-0.6b-v3-local": LocalModel(
+        "Parakeet TDT 0.6B v3 local", "handy-computer/parakeet-tdt-0.6b-v3-gguf",
+        "parakeet-tdt-0.6b-v3-Q8_0.gguf"),
+}
 LOCAL_MODELS_DIR = Path(__file__).parent / "models"
 
 MODEL_RATE = 16000
 IDLE_UNLOAD = 600
 
 
-def find_model():
-    """Chemin du fichier .gguf : NEMOTRON_MODEL, sinon le cache de Handy, sinon models/."""
-    forced = os.environ.get("NEMOTRON_MODEL")
-    if forced:
-        return forced if os.path.isfile(forced) else None
+def find_model(model_id):
+    """Chemin du fichier .gguf du modèle : cache Hugging Face (Handy), sinon models/."""
+    spec = LOCAL_MODELS[model_id]
     hub = os.environ.get("HF_HUB_CACHE") or os.path.join(
         os.environ.get("HF_HOME") or os.path.expanduser("~/.cache/huggingface"), "hub")
-    pattern = os.path.join(hub, "models--" + HF_REPO.replace("/", "--"), "snapshots", "*", MODEL_FILE)
-    found = sorted(glob.glob(pattern)) + sorted(glob.glob(str(LOCAL_MODELS_DIR / "*.gguf")))
+    pattern = os.path.join(hub, "models--" + spec.repo.replace("/", "--"), "snapshots", "*", spec.file)
+    found = sorted(glob.glob(pattern))
+    local = LOCAL_MODELS_DIR / spec.file
+    if local.is_file():
+        found.append(str(local))
     return found[0] if found else None
 
 
-def missing_requirement():
-    """Message d'erreur si le moteur ou le modèle manque, sinon None."""
+def missing_requirement(model_id):
+    """Message d'erreur si le moteur ou le fichier du modèle manque, sinon None."""
     absent = [p for p, mod in (("transcribe-cpp", "transcribe_cpp"), ("soxr", "soxr"))
               if importlib.util.find_spec(mod) is None]
     if absent:
         return ("Paquets manquants : %s.\nRelancez setup.bat ou installez-les avec "
                 "« pip install -r requirements.txt »." % ", ".join(absent))
-    if find_model() is None:
-        return ("Modèle Nemotron introuvable.\n\nIl est présent si Handy l'a téléchargé. Sinon, "
-                "placez le fichier %s dans le dossier « models » de l'application :\n%s"
-                % (MODEL_FILE, MODEL_URL))
+    if find_model(model_id) is None:
+        spec = LOCAL_MODELS[model_id]
+        return ("Modèle %s introuvable.\n\nPlacez le fichier %s dans le dossier « models » de "
+                "l'application :\n%s" % (spec.label, spec.file, spec.url))
     return None
 
 
-class NemotronEngine:
+def _language_code(model, language):
+    """Code de langue tel que le modèle l'attend (« fr », « fr-FR »…), None s'il détecte seul."""
+    codes = model.capabilities.languages
+    for code in codes:
+        if code == language:
+            return code
+    for code in codes:
+        if code.split("-")[0] == language:
+            return code
+    return None
+
+
+class LocalEngine:
     """Une dictée à la fois : begin, feed au fil du son, puis finish (texte) ou cancel."""
 
-    def __init__(self, language="fr-FR"):
+    def __init__(self, language="fr"):
         self.language = language
         self.device = None
         self._commands = queue.Queue()
         self._thread = None
         self._thread_lock = threading.Lock()
 
-    def preload(self):
-        self._send("preload", None)
+    def preload(self, model_id):
+        self._send("preload", model_id)
 
-    def begin(self, input_rate):
-        self._send("begin", input_rate)
+    def begin(self, model_id, input_rate):
+        self._send("begin", (model_id, input_rate))
 
     def feed(self, data):
         """Son brut du micro : int16 mono, au taux annoncé dans begin."""
@@ -94,39 +137,65 @@ class NemotronEngine:
         self._commands.put((kind, arg))
 
     def _run(self):
-        model = session = stream = resampler = None
+        model = session = None
+        loaded_id = language = None
+        # Dictée en cours : `stream` pour un modèle en continu, `chunks` (son déjà au taux du
+        # modèle) pour les autres.
+        resampler = stream = chunks = None
         error = None
         last_used = time.monotonic()
 
-        def load():
-            nonlocal model, session
-            if model is not None:
+        def load(model_id):
+            nonlocal model, session, loaded_id, language
+            if loaded_id == model_id:
                 return
-            path = find_model()
+            unload()
+            path = find_model(model_id)
             if path is None:
-                raise FileNotFoundError(missing_requirement())
+                raise FileNotFoundError(missing_requirement(model_id))
             import transcribe_cpp
             model = transcribe_cpp.Model(path)
             session = model.session().__enter__()
+            loaded_id = model_id
+            language = _language_code(model, self.language)
             self.device = model.device.description
             # Premier passage à vide : compile les noyaux GPU avant la première vraie dictée.
-            with session.stream(language=self.language) as warmup:
-                warmup.feed(np.zeros(MODEL_RATE, dtype=np.float32))
-                warmup.finalize()
+            silence = np.zeros(MODEL_RATE, dtype=np.float32)
+            if LOCAL_MODELS[model_id].streaming:
+                with session.stream(language=language) as warmup:
+                    warmup.feed(silence)
+                    warmup.finalize()
+            else:
+                session.run(silence, language=language, timestamps="none")
 
         def unload():
-            nonlocal model, session
+            nonlocal model, session, loaded_id
             if session is not None:
                 session.__exit__(None, None, None)
             if model is not None:
                 model.close()
-            model = session = None
+            model = session = loaded_id = None
 
-        def close_stream():
-            nonlocal stream, resampler
+        def close_dictation():
+            nonlocal stream, chunks, resampler
             if stream is not None:
                 stream.__exit__(None, None, None)
-            stream = resampler = None
+            stream = chunks = resampler = None
+
+        def transcribe_rest():
+            """Fin de la dictée : décode ce qui reste et renvoie le texte complet."""
+            tail = resampler.resample_chunk(np.zeros(0, dtype=np.float32), last=True)
+            if stream is not None:
+                if len(tail):
+                    stream.feed(tail)
+                stream.finalize()
+                return stream.text().full.strip()
+            if len(tail):
+                chunks.append(tail)
+            if not chunks:
+                return ""
+            pcm = np.concatenate(chunks)
+            return session.run(pcm, language=language, timestamps="none").text.strip()
 
         pending = None
         while True:
@@ -136,61 +205,65 @@ class NemotronEngine:
                 try:
                     kind, arg = self._commands.get(timeout=30)
                 except queue.Empty:
-                    if model is not None and stream is None and time.monotonic() - last_used > IDLE_UNLOAD:
+                    idle = stream is None and chunks is None
+                    if model is not None and idle and time.monotonic() - last_used > IDLE_UNLOAD:
                         unload()
                     continue
             last_used = time.monotonic()
 
-            # Le micro livre de petits blocs : on donne d'un coup au modèle tout le son en attente.
+            # Le micro livre de petits blocs : on traite d'un coup tout le son en attente.
             if kind == "audio":
-                chunks = [arg]
+                parts = [arg]
                 while pending is None:
                     try:
                         nxt = self._commands.get_nowait()
                     except queue.Empty:
                         break
                     if nxt[0] == "audio":
-                        chunks.append(nxt[1])
+                        parts.append(nxt[1])
                     else:
                         pending = nxt
-                arg = b"".join(chunks)
+                arg = b"".join(parts)
 
             try:
                 if kind == "preload":
-                    load()
+                    load(arg)
                 elif kind == "begin":
-                    close_stream()
+                    model_id, input_rate = arg
+                    close_dictation()
                     error = None
-                    load()
+                    load(model_id)
                     import soxr
-                    resampler = soxr.ResampleStream(arg, MODEL_RATE, 1, dtype="float32")
-                    stream = session.stream(language=self.language).__enter__()
+                    resampler = soxr.ResampleStream(input_rate, MODEL_RATE, 1, dtype="float32")
+                    if LOCAL_MODELS[model_id].streaming:
+                        stream = session.stream(language=language).__enter__()
+                    else:
+                        chunks = []
                 elif kind == "audio":
-                    if stream is not None:
+                    if resampler is not None:
                         pcm = np.frombuffer(arg, dtype="<i2").astype(np.float32) / 32768.0
                         out = resampler.resample_chunk(pcm)
                         if len(out):
-                            stream.feed(out)
+                            if stream is not None:
+                                stream.feed(out)
+                            else:
+                                chunks.append(out)
                 elif kind == "cancel":
-                    close_stream()
+                    close_dictation()
                 elif kind == "end":
                     if error is not None:
                         arg.put((False, error))
-                    elif stream is None:
+                    elif resampler is None:
                         arg.put((True, ""))
                     else:
-                        tail = resampler.resample_chunk(np.zeros(0, dtype=np.float32), last=True)
-                        if len(tail):
-                            stream.feed(tail)
-                        stream.finalize()
-                        text = stream.text().full.strip()
-                        close_stream()
+                        text = transcribe_rest()
+                        close_dictation()
                         arg.put((True, text))
                     error = None
             except Exception as e:
-                close_stream()
+                close_dictation()
                 if kind == "end":
                     arg.put((False, e))
                 elif kind != "preload":
                     error = e
-                print(f"⚠️ Nemotron ({kind}) : {e}")
+                print(f"⚠️ Modèle local ({kind}) : {e}")
