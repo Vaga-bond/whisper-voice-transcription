@@ -134,6 +134,15 @@ SAFE_BARE_VKS = set(range(112, 136))                                    # F1-F24
 HOTKEY_REPEAT_GAP = 1.0      # au-delà, deux appuis ne peuvent plus être une répétition
 HOTKEY_MIN_INTERVAL = 0.35   # intervalle minimum entre deux bascules réelles
 
+# Le collage attend que le raccourci soit relâché : tenu, Ctrl+V deviendrait
+# Ctrl+Alt+V et Alt + pavé numérique un code Alt (« ○ » pour Alt+9).
+PASTE_KEY_POLL_MS = 10
+PASTE_RELEASE_TIMEOUT = 2.0   # au-delà, le texte attend dans le presse-papier
+# L'application cible lit le presse-papier en traitant Ctrl+V, parfois avec retard.
+CLIPBOARD_RESTORE_DELAY_MS = 1000
+# Maj, Ctrl, Alt, Win gauche et droite : enfoncés, ils détournent Ctrl+V.
+MODIFIER_VKS = (0x10, 0x11, 0x12, 0x5B, 0x5C)
+
 DEFAULT_HOTKEY = {
     'modifiers': ['ctrl', 'alt'],
     # 9 de la rangée du haut (VK 57) et du pavé numérique (VK 105) : selon le
@@ -1880,57 +1889,84 @@ class VoiceTranscriptionApp:
         self.text_history = []
         self.history_index = -1
 
-        auto_copy = self.auto_copy_var.get()
-        auto_paste = self.auto_paste_var.get()
+        if self.auto_paste_var.get():
+            self._paste_when_released(text, time.monotonic() + PASTE_RELEASE_TIMEOUT)
+            return
 
         status_text = "✅ Transcription terminée"
         status_color = "green"
-
-        if auto_paste:
-            # Pour injecter dans le champ actif sans écraser durablement le presse-papier,
-            # on sauvegarde l'ancien contenu si l'utilisateur n'a pas activé auto_copy.
-            saved_clipboard = None
-            if not auto_copy:
-                try:
-                    saved_clipboard = pyperclip.paste()
-                except Exception:
-                    saved_clipboard = None
-
-            try:
-                pyperclip.copy(text)
-                time.sleep(0.15)
-                # Ctrl+Maj+V si le toggle manuel est actif (terminaux intégrés type
-                # Cursor) ou si la fenêtre active est un terminal connu.
-                if self.terminal_paste_var.get() or self._is_terminal_window_focused():
-                    pyautogui.hotkey('ctrl', 'shift', 'v')
-                else:
-                    pyautogui.hotkey('ctrl', 'v')
-                # Laisser le temps au collage de se terminer avant de restaurer
-                time.sleep(0.15)
-            except Exception:
-                status_text = "✅ Transcription terminée (collage échoué)"
-                status_color = "orange"
-
-            if not auto_copy and saved_clipboard is not None:
-                try:
-                    pyperclip.copy(saved_clipboard)
-                except Exception:
-                    pass
-
-            if status_color == "green":
-                status_text = (
-                    "✅ Collé et copié"
-                    if auto_copy else
-                    "✅ Collé (presse-papier préservé)"
-                )
-        elif auto_copy:
+        if self.auto_copy_var.get():
             try:
                 pyperclip.copy(text)
                 status_text = "✅ Copié dans le presse-papier"
             except Exception:
                 status_text = "✅ Transcription terminée (copie échouée)"
                 status_color = "orange"
+        self._finish_transcription(status_text, status_color)
 
+    def _paste_keys_held(self):
+        """Un modificateur ou une touche du raccourci est-il encore enfoncé ?"""
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+        except Exception:
+            return False
+        vks = MODIFIER_VKS + tuple(self.hotkey['vks'])
+        return any(user32.GetAsyncKeyState(vk) & 0x8000 for vk in vks)
+
+    def _paste_when_released(self, text, deadline):
+        """Colle dès que le clavier est libre, sans figer l'interface pendant l'attente."""
+        if not self._paste_keys_held():
+            self._paste_text(text)
+            return
+        if time.monotonic() < deadline:
+            self.root.after(PASTE_KEY_POLL_MS, self._paste_when_released, text, deadline)
+            return
+        try:
+            pyperclip.copy(text)
+            status_text = "⚠️ Touches encore enfoncées : Ctrl+V pour coller"
+        except Exception:
+            status_text = "⚠️ Touches encore enfoncées : collage annulé"
+        self._finish_transcription(status_text, "orange")
+
+    def _paste_text(self, text):
+        """Injecte le texte dans le champ actif, puis rend l'ancien presse-papier sauf si auto_copy."""
+        auto_copy = self.auto_copy_var.get()
+        saved_clipboard = None
+        if not auto_copy:
+            try:
+                saved_clipboard = pyperclip.paste()
+            except Exception:
+                saved_clipboard = None
+
+        try:
+            pyperclip.copy(text)
+            # Ctrl+Maj+V si le toggle manuel est actif (terminaux intégrés type
+            # Cursor) ou si la fenêtre active est un terminal connu.
+            if self.terminal_paste_var.get() or self._is_terminal_window_focused():
+                pyautogui.hotkey('ctrl', 'shift', 'v')
+            else:
+                pyautogui.hotkey('ctrl', 'v')
+            status_text = "✅ Collé et copié" if auto_copy else "✅ Collé (presse-papier préservé)"
+            status_color = "green"
+        except Exception:
+            status_text = "✅ Transcription terminée (collage échoué)"
+            status_color = "orange"
+
+        if saved_clipboard is not None:
+            self.root.after(CLIPBOARD_RESTORE_DELAY_MS,
+                            self._restore_clipboard, text, saved_clipboard)
+        self._finish_transcription(status_text, status_color)
+
+    def _restore_clipboard(self, pasted, saved):
+        """Remet l'ancien presse-papier, sauf si autre chose y a été copié entre-temps."""
+        try:
+            if pyperclip.paste() == pasted:
+                pyperclip.copy(saved)
+        except Exception:
+            pass
+
+    def _finish_transcription(self, status_text, status_color):
         self.play_sound('end.wav')
         self._reset_ui(status_text)
         self.status_label.config(text=status_text, fg=status_color)
