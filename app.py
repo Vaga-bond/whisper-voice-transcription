@@ -26,7 +26,8 @@ import pygame
 import pyautogui
 
 import clipboard
-from local_engine import LocalEngine, LOCAL_MODELS, missing_requirement
+from local_engine import (LocalEngine, LOCAL_MODELS, download as download_model, find_model,
+                          missing_packages, missing_requirement)
 
 # Sans ça, les emojis des prints crashent une console Windows en cp1252.
 for flux in (sys.stdout, sys.stderr):
@@ -39,7 +40,7 @@ load_dotenv()
 # gpt-live-transcribe et gpt-realtime-whisper sont exclus, ils ne répondent que
 # sur les sessions Realtime WebSocket.
 MODEL_OPTIONS = [
-    ("GPT Transcribe (recommandé)", "gpt-transcribe"),
+    ("GPT Transcribe", "gpt-transcribe"),
     ("GPT-4o Transcribe", "gpt-4o-transcribe"),
     ("GPT-4o Mini Transcribe", "gpt-4o-mini-transcribe"),
     ("Whisper-1", "whisper-1"),
@@ -140,7 +141,7 @@ HOTKEY_MIN_INTERVAL = 0.35   # intervalle minimum entre deux bascules réelles
 PASTE_KEY_POLL_MS = 10
 PASTE_RELEASE_TIMEOUT = 2.0   # au-delà, le texte attend dans le presse-papier
 # L'application cible lit le presse-papier en traitant Ctrl+V, parfois avec retard.
-CLIPBOARD_RESTORE_DELAY_MS = 1000
+CLIPBOARD_RESTORE_DELAY_MS = 300
 # Maj, Ctrl, Alt, Win gauche et droite : enfoncés, ils détournent Ctrl+V.
 MODIFIER_VKS = (0x10, 0x11, 0x12, 0x5B, 0x5C)
 
@@ -171,7 +172,7 @@ def normalize_hotkey(value):
             'vks': list(DEFAULT_HOTKEY['vks'])}
 
 DEFAULT_PREFS = {
-    "selected_model": "gpt-transcribe",
+    "selected_model": "whisper-large-v3-turbo-local",
     "selected_device_name": None,   # Nom du micro (pas l'index — plus stable entre sessions)
     "max_recording_duration": 240,
     "auto_copy": True,
@@ -561,6 +562,7 @@ class VoiceTranscriptionApp:
         self.recording_thread = None
         self.recording_start_time = None
         self.recording_model = None
+        self._downloads = set()   # modèles locaux en cours de téléchargement
         self.selected_device_index = None
         self.local_engine = LocalEngine(language="fr")
 
@@ -1171,12 +1173,74 @@ class VoiceTranscriptionApp:
         self.model_var.set(label)
         self._save_prefs()
         print(f"Modèle changé: {label} ({api_name})")
-        if api_name in LOCAL_MODELS:
-            problem = missing_requirement(self.selected_model)
-            if problem:
-                messagebox.showwarning("Modèle local", problem)
-            else:
-                self.local_engine.preload(self.selected_model)
+        if api_name in LOCAL_MODELS and self._local_model_ready(api_name):
+            self.local_engine.preload(api_name)
+
+    def _local_model_ready(self, model_id):
+        """Le modèle local est-il utilisable ? Sinon l'explique, ou propose de le télécharger."""
+        problem = missing_packages()
+        if problem:
+            messagebox.showerror("Modèle local", problem)
+            return False
+        if find_model(model_id) is not None:
+            return True
+        spec = LOCAL_MODELS[model_id]
+        if model_id in self._downloads:
+            messagebox.showinfo("Modèle local", f"{spec.label} est en cours de téléchargement.")
+        elif messagebox.askyesno(
+                "Modèle local",
+                f"{spec.label} n'est pas encore sur cet ordinateur.\n\n"
+                f"Le télécharger maintenant ? Environ {spec.size_text} depuis Hugging Face, "
+                f"dans le dossier « models » de l'application."):
+            self._start_download(model_id)
+        return False
+
+    def _start_download(self, model_id):
+        """Télécharge le modèle en arrière-plan, l'avancement dans le statut et l'overlay."""
+        label = LOCAL_MODELS[model_id].label
+        self._downloads.add(model_id)
+        shown = [-1]
+
+        def progress(done, total):
+            percent = done * 100 // total if total else 0
+            if percent != shown[0]:
+                shown[0] = percent
+                self.root.after(0, self._show_download_progress, label, percent)
+
+        def run():
+            try:
+                download_model(model_id, progress)
+                error = None
+            except Exception as e:
+                error = e
+            self.root.after(0, self._download_finished, model_id, error)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _show_download_progress(self, label, percent):
+        text = f"⬇️ {label} : {percent} %"
+        busy = self.is_recording or self.is_transcribing
+        if not busy:
+            self.status_label.config(text=text, fg="blue")
+            if hasattr(self, 'overlay'):
+                self.overlay.show(text, bg="#1565c0")
+
+    def _download_finished(self, model_id, error):
+        self._downloads.discard(model_id)
+        label = LOCAL_MODELS[model_id].label
+        busy = self.is_recording or self.is_transcribing
+        if error is not None:
+            if not busy and hasattr(self, 'overlay'):
+                self.overlay.hide()
+            self.status_label.config(text="❌ Téléchargement échoué", fg="red")
+            messagebox.showerror("Téléchargement", f"{label} : téléchargement échoué.\n\n{error}")
+            return
+        if not busy:
+            self.status_label.config(text=f"✅ {label} prêt", fg="green")
+            if hasattr(self, 'overlay'):
+                self.overlay.show_briefly(f"✅ {label} prêt", bg="#2e7d32", duration_ms=2500)
+        if self.selected_model == model_id:
+            self.local_engine.preload(model_id)
 
     def _deferred_init(self):
         """Initialisations lourdes différées pour accélérer l'apparition de la fenêtre"""
@@ -1647,9 +1711,7 @@ class VoiceTranscriptionApp:
 
         if not self.is_recording:
             if self.selected_model in LOCAL_MODELS:
-                problem = missing_requirement(self.selected_model)
-                if problem:
-                    messagebox.showerror("Modèle local", problem)
+                if not self._local_model_ready(self.selected_model):
                     return
             elif self.client is None:
                 messagebox.showwarning(

@@ -19,7 +19,9 @@ if not exist .env (
     echo Copie de .env.example vers .env...
     copy .env.example .env
     echo.
-    echo Cle API OpenAI requise. Deux options :
+    echo Les modeles locaux fonctionnent sans cle : le modele choisi se telecharge
+    echo depuis l'application a la premiere dictee.
+    echo Pour les modeles OpenAI, une cle API est necessaire. Deux options :
     echo   1. La renseigner via l'interface de l'app ^(bouton "Modifier la cle..."^)
     echo   2. L'editer manuellement dans le fichier .env
     echo Obtenez votre cle sur: https://platform.openai.com/api-keys

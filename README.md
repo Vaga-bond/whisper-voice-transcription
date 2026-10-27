@@ -1,13 +1,17 @@
-# Transcription Vocale — OpenAI
+# Transcription Vocale — locale ou OpenAI
 
-Petit outil Windows pour transcrire la voix en texte via l'API OpenAI, déclenchable par raccourci clavier global et utilisable depuis n'importe quelle application. Le texte est collé directement dans le champ actif, la fenêtre peut tourner réduite dans la barre système.
+Petit outil Windows pour transcrire la voix en texte, sur l'ordinateur (modèles locaux, gratuits) ou via l'API OpenAI, déclenchable par raccourci clavier global et utilisable depuis n'importe quelle application. Le texte est collé directement dans le champ actif, la fenêtre peut tourner réduite dans la barre système.
 
 ## Installation
 
 Prérequis : **Python 3.10 ou plus récent**, installé avec l'option « Add Python to PATH » ([python.org/downloads](https://www.python.org/downloads/)).
 
-1. Lancer `setup.bat` (crée l'environnement virtuel et installe les dépendances)
-2. Lancer `start.bat` — la clé API se configure via l'interface (bouton **« Modifier la clé… »** dans le panneau d'options), validée auprès d'OpenAI puis sauvegardée dans `.env` local. Alternative : copier `.env.example` en `.env` et renseigner `OPENAI_API_KEY` à la main.
+1. Lancer `setup.bat` (crée l'environnement virtuel et installe les dépendances, moteur local compris)
+2. Lancer `start.bat`.
+
+Le modèle par défaut, **Whisper large-v3 turbo local**, ne demande ni compte ni clé : à la première dictée, l'application propose de télécharger son fichier (≈ 890 Mo). Les autres modèles locaux se téléchargent de la même façon quand on les choisit. Rien d'autre à installer : le moteur arrive avec `setup.bat`, et la carte graphique est utilisée par son pilote habituel (Vulkan, présent avec les pilotes NVIDIA, AMD et Intel récents) ; sans carte graphique compatible, le processeur prend le relais, plus lentement.
+
+Pour les modèles OpenAI, la clé API se configure via l'interface (bouton **« Modifier la clé… »** dans le panneau d'options), validée auprès d'OpenAI puis sauvegardée dans `.env` local. Alternative : copier `.env.example` en `.env` et renseigner `OPENAI_API_KEY` à la main.
 
 ## Utilisation
 
@@ -34,11 +38,11 @@ Le raccourci est écouté au niveau du système, en amont des applications. Wind
 
   | Modèle | Facturation | Coût par minute |
   |---|---|---|
-  | **GPT Transcribe** (défaut) | durée | 0,0045 $ ferme |
+  | **GPT Transcribe** | durée | 0,0045 $ ferme |
   | **GPT-4o Transcribe** | tokens (2,50 $ / 10,00 $ par 1M) | ≈ 0,0033 $ |
   | **GPT-4o Mini Transcribe** | tokens (1,25 $ / 5,00 $ par 1M) | ≈ 0,0016 $ |
   | **Whisper-1** (ancienne génération) | durée | 0,006 $ ferme |
-  | **Nemotron 3.5**, **Qwen3-ASR 1.7B**, **Whisper large-v3 turbo**, **Granite Speech 4.1 2B**, **Parakeet TDT 0.6B v3** (locaux) | aucune, sur l'ordinateur | 0 $ |
+  | **Whisper large-v3 turbo** (défaut, recommandé), **Nemotron 3.5**, **Qwen3-ASR 1.7B**, **Granite Speech 4.1 2B**, **Parakeet TDT 0.6B v3** (locaux) | aucune, sur l'ordinateur | 0 $ |
 
   Les coûts par minute des modèles GPT-4o sont mesurés sur une minute de dictée
   française continue (≈ 600 tokens audio en entrée + ≈ 180 tokens de texte en sortie) ;
@@ -56,22 +60,29 @@ Le raccourci est écouté au niveau du système, en amont des applications. Wind
   processeur. Aucune clé API, aucun envoi de son. Un seul modèle est chargé à la fois : il l'est
   au démarrage quand il est sélectionné, et libéré après 10 minutes sans usage, comme dans Handy.
 
-  | Modèle local | Fichier (Q8_0) | Transcription |
-  |---|---|---|
-  | Nemotron 3.5 ASR Streaming 0.6B | [≈ 720 Mo](https://huggingface.co/handy-computer/nemotron-3.5-asr-streaming-0.6b-gguf/resolve/main/nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf) | pendant l'enregistrement |
-  | Qwen3-ASR 1.7B | [≈ 2,2 Go](https://huggingface.co/handy-computer/Qwen3-ASR-1.7B-gguf/resolve/main/Qwen3-ASR-1.7B-Q8_0.gguf) | à l'arrêt |
-  | Whisper large-v3 turbo | [≈ 890 Mo](https://huggingface.co/handy-computer/whisper-large-v3-turbo-gguf/resolve/main/whisper-large-v3-turbo-Q8_0.gguf) | à l'arrêt |
-  | Granite Speech 4.1 2B | [≈ 2,6 Go](https://huggingface.co/handy-computer/granite-speech-4.1-2b-gguf/resolve/main/granite-speech-4.1-2b-Q8_0.gguf) | à l'arrêt, 6 minutes au plus |
-  | Parakeet TDT 0.6B v3 | [≈ 740 Mo](https://huggingface.co/handy-computer/parakeet-tdt-0.6b-v3-gguf/resolve/main/parakeet-tdt-0.6b-v3-Q8_0.gguf) | à l'arrêt |
+  | Modèle local | Fichier (Q8_0) | Mémoire graphique | Attente pour 60 s de dictée (RTX 3080) |
+  |---|---|---|---|
+  | Whisper large-v3 turbo (recommandé) | [≈ 890 Mo](https://huggingface.co/handy-computer/whisper-large-v3-turbo-gguf/resolve/main/whisper-large-v3-turbo-Q8_0.gguf) | ≈ 0,9 Go | 1,2 s |
+  | Nemotron 3.5 ASR Streaming 0.6B | [≈ 720 Mo](https://huggingface.co/handy-computer/nemotron-3.5-asr-streaming-0.6b-gguf/resolve/main/nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf) | ≈ 0,7 Go | quasi nulle, transcrit pendant l'enregistrement |
+  | Qwen3-ASR 1.7B | [≈ 2,2 Go](https://huggingface.co/handy-computer/Qwen3-ASR-1.7B-gguf/resolve/main/Qwen3-ASR-1.7B-Q8_0.gguf) | ≈ 3,1 Go | 1,6 s |
+  | Granite Speech 4.1 2B | [≈ 2,6 Go](https://huggingface.co/handy-computer/granite-speech-4.1-2b-gguf/resolve/main/granite-speech-4.1-2b-Q8_0.gguf) | ≈ 3,4 Go | 9,7 s ; 6 minutes de dictée au plus |
+  | Parakeet TDT 0.6B v3 | [≈ 740 Mo](https://huggingface.co/handy-computer/parakeet-tdt-0.6b-v3-gguf/resolve/main/parakeet-tdt-0.6b-v3-Q8_0.gguf) | ≈ 0,7 Go | 0,6 s |
 
   Nemotron transcrit pendant que vous parlez : le texte arrive une fraction de seconde après
   l'arrêt, quelle que soit la durée de la dictée. Les autres transcrivent tout d'un bloc à
-  l'arrêt ; sur une RTX 3080, 20 secondes de dictée prennent de 0,2 s (Parakeet) à 0,8 s
-  (Granite).
+  l'arrêt.
 
-  Chaque fichier est lu dans le cache Hugging Face (`~/.cache/huggingface/hub`) quand Handy l'a
-  téléchargé, sinon dans un dossier `models` à côté de `app.py` : y déposer les fichiers liés
-  ci-dessus.
+  **Lesquels choisir.** Observation d'usage en octobre 2026, sur de la dictée française :
+  Whisper large-v3 turbo est le plus rapide à l'usage, reconnaît bien les noms propres et les
+  mots anglais, écrit les chiffres en chiffres et garde les hésitations. Qwen3-ASR est aussi
+  juste, un peu plus lourd. Parakeet est rapide mais bascule parfois en anglais au milieu d'une
+  dictée française. Granite est lent sur les longues dictées et écrit les chiffres en lettres.
+  Nemotron écrit les chiffres en lettres et écorche davantage les noms propres.
+
+  Un modèle absent est proposé au téléchargement quand on le choisit ou qu'on lance une dictée
+  avec lui : il est enregistré dans un dossier `models` à côté de `app.py`. Un fichier déjà
+  téléchargé par Handy, dans le cache Hugging Face (`~/.cache/huggingface/hub`), est utilisé
+  tel quel.
 - Les modèles `gpt-live-transcribe` et `gpt-realtime-whisper` ne sont pas proposés : ils
   n'existent que sur les sessions Realtime WebSocket et renvoient 404 sur
   `v1/audio/transcriptions`, l'endpoint fichier utilisé ici.
@@ -88,7 +99,7 @@ Le raccourci est écouté au niveau du système, en amont des applications. Wind
 - Désactivable dans les options
 
 ### Copie et collage
-- **Copier dans le presse-papier** et **Coller dans le champ actif** sont deux options indépendantes. Coller sans copier est possible : le contenu d'origine du presse-papier, image ou fichiers compris, est restauré une seconde après le collage, sauf si autre chose y a été copié entre-temps.
+- **Copier dans le presse-papier** et **Coller dans le champ actif** sont deux options indépendantes. Coller sans copier est possible : le contenu d'origine du presse-papier, image ou fichiers compris, est restauré 0,3 seconde après le collage, sauf si autre chose y a été copié entre-temps.
 - Le collage attend que les touches du raccourci soient relâchées : tenues, elles changeraient `Ctrl+V` en un autre raccourci. Au-delà de 2 secondes, le texte reste dans le presse-papier sans être collé.
 - Détection automatique des terminaux natifs (Windows Terminal, cmd, PuTTY, mintty) → `Ctrl+Maj+V` au lieu de `Ctrl+V`
 - Toggle manuel **« Coller pour terminal »** pour les terminaux intégrés (Cursor, VS Code…) qui partagent la classe de fenêtre de leur éditeur et ne sont pas détectables automatiquement
@@ -130,7 +141,7 @@ Voir `requirements.txt` pour les versions.
 - `app.py` — application principale
 - `local_engine.py` — transcription locale (modèles et moteur)
 - `clipboard.py` — sauvegarde et restauration du presse-papier dans tous ses formats
-- `models/` — fichiers des modèles locaux téléchargés à la main (non versionné)
+- `models/` — fichiers des modèles locaux, téléchargés par l'application (non versionné)
 - `.env` — clé API (non versionné)
 - `sounds/` — sons de feedback
 - `transcription_history.json` — historique des transcriptions (local, non versionné)
@@ -140,7 +151,7 @@ Voir `requirements.txt` pour les versions.
 
 ## Notes
 
-Clé API OpenAI requise pour les modèles OpenAI, facturée à votre compte selon l'usage ; le modèle local s'en passe. Les tarifs ci-dessus sont indicatifs et peuvent évoluer — voir [platform.openai.com/pricing](https://platform.openai.com/pricing) pour les prix en vigueur.
+Clé API OpenAI requise pour les modèles OpenAI, facturée à votre compte selon l'usage ; les modèles locaux s'en passent. Les tarifs ci-dessus sont indicatifs et peuvent évoluer — voir [platform.openai.com/pricing](https://platform.openai.com/pricing) pour les prix en vigueur.
 
 ## Contribuer
 

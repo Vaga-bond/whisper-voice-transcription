@@ -16,6 +16,7 @@ import os
 import queue
 import threading
 import time
+import urllib.request
 from pathlib import Path
 from typing import NamedTuple
 
@@ -26,31 +27,38 @@ class LocalModel(NamedTuple):
     label: str
     repo: str
     file: str
+    size_mb: int
     streaming: bool = False
 
     @property
     def url(self):
         return f"https://huggingface.co/{self.repo}/resolve/main/{self.file}"
 
+    @property
+    def size_text(self):
+        if self.size_mb < 1000:
+            return f"{self.size_mb} Mo"
+        return f"{self.size_mb / 1000:.1f} Go".replace(".", ",")
+
 
 # Identifiant (préférences, historique) → modèle. Q8_0 partout : la quantification la plus
 # basse qui reste au niveau du modèle d'origine.
 LOCAL_MODELS = {
+    "whisper-large-v3-turbo-local": LocalModel(
+        "Whisper large-v3 turbo local (recommandé)", "handy-computer/whisper-large-v3-turbo-gguf",
+        "whisper-large-v3-turbo-Q8_0.gguf", 886),
     "nemotron-3.5-local": LocalModel(
         "Nemotron 3.5 local (Handy)", "handy-computer/nemotron-3.5-asr-streaming-0.6b-gguf",
-        "nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf", streaming=True),
+        "nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf", 720, streaming=True),
     "qwen3-asr-1.7b-local": LocalModel(
         "Qwen3-ASR 1.7B local", "handy-computer/Qwen3-ASR-1.7B-gguf",
-        "Qwen3-ASR-1.7B-Q8_0.gguf"),
-    "whisper-large-v3-turbo-local": LocalModel(
-        "Whisper large-v3 turbo local", "handy-computer/whisper-large-v3-turbo-gguf",
-        "whisper-large-v3-turbo-Q8_0.gguf"),
+        "Qwen3-ASR-1.7B-Q8_0.gguf", 2185),
     "granite-speech-4.1-2b-local": LocalModel(
         "Granite Speech 4.1 2B local", "handy-computer/granite-speech-4.1-2b-gguf",
-        "granite-speech-4.1-2b-Q8_0.gguf"),
+        "granite-speech-4.1-2b-Q8_0.gguf", 2560),
     "parakeet-tdt-0.6b-v3-local": LocalModel(
         "Parakeet TDT 0.6B v3 local", "handy-computer/parakeet-tdt-0.6b-v3-gguf",
-        "parakeet-tdt-0.6b-v3-Q8_0.gguf"),
+        "parakeet-tdt-0.6b-v3-Q8_0.gguf", 740),
 }
 LOCAL_MODELS_DIR = Path(__file__).parent / "models"
 
@@ -71,18 +79,51 @@ def find_model(model_id):
     return found[0] if found else None
 
 
-def missing_requirement(model_id):
-    """Message d'erreur si le moteur ou le fichier du modèle manque, sinon None."""
+def missing_packages():
+    """Message d'erreur si le moteur n'est pas installé, sinon None."""
     absent = [p for p, mod in (("transcribe-cpp", "transcribe_cpp"), ("soxr", "soxr"))
               if importlib.util.find_spec(mod) is None]
     if absent:
         return ("Paquets manquants : %s.\nRelancez setup.bat ou installez-les avec "
                 "« pip install -r requirements.txt »." % ", ".join(absent))
+    return None
+
+
+def missing_requirement(model_id):
+    """Message d'erreur si le moteur ou le fichier du modèle manque, sinon None."""
+    problem = missing_packages()
+    if problem:
+        return problem
     if find_model(model_id) is None:
         spec = LOCAL_MODELS[model_id]
         return ("Modèle %s introuvable.\n\nPlacez le fichier %s dans le dossier « models » de "
                 "l'application :\n%s" % (spec.label, spec.file, spec.url))
     return None
+
+
+def download(model_id, progress):
+    """Télécharge le fichier du modèle dans models/ ; progress(reçus, total) au fil de l'eau."""
+    spec = LOCAL_MODELS[model_id]
+    LOCAL_MODELS_DIR.mkdir(exist_ok=True)
+    target = LOCAL_MODELS_DIR / spec.file
+    part = target.with_name(target.name + ".part")
+    try:
+        with urllib.request.urlopen(spec.url, timeout=30) as response, open(part, "wb") as out:
+            total = int(response.headers.get("Content-Length") or 0)
+            done = 0
+            while True:
+                block = response.read(1 << 20)
+                if not block:
+                    break
+                out.write(block)
+                done += len(block)
+                progress(done, total)
+        if total and done != total:
+            raise IOError(f"téléchargement incomplet ({done} octets sur {total})")
+        part.replace(target)
+    except BaseException:
+        part.unlink(missing_ok=True)
+        raise
 
 
 def _language_code(model, language):
