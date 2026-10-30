@@ -580,9 +580,6 @@ class VoiceTranscriptionApp:
 
         self.history = self._load_history()
 
-        self.text_history = []
-        self.history_index = -1
-
         self.hotkey_thread = None
         self.esc_thread = None
 
@@ -1010,14 +1007,21 @@ class VoiceTranscriptionApp:
             wrap=tk.WORD,
             font=("Arial", 11),
             height=20,
-            width=70
+            width=70,
+            undo=True,
+            maxundo=-1
         )
         self.text_area.pack(fill=tk.BOTH, expand=True, pady=(5, 0))
-        
-        self.text_area.bind('<Control-z>', self.undo_clear)
-        self.text_area.bind('<Control-Z>', self.undo_clear)
-        self.root.bind('<Control-z>', self.undo_clear)
-        self.root.bind('<Control-Z>', self.undo_clear)
+
+        # Annulation native de Tk : chaque transcription, effacement ou collage
+        # est une étape, Ctrl+Z la défait et Ctrl+Y la refait, sans limite.
+        # Liés aussi sur la zone elle-même : son "break" court-circuite la liaison
+        # de classe Text, qui ferait sinon une seconde annulation.
+        for widget in (self.text_area, self.root):
+            for seq in ('<Control-z>', '<Control-Z>'):
+                widget.bind(seq, self.undo_text)
+            for seq in ('<Control-y>', '<Control-Y>'):
+                widget.bind(seq, self.redo_text)
         
         button_frame = tk.Frame(main_frame)
         button_frame.pack(pady=15, fill=tk.X)
@@ -1947,11 +1951,10 @@ class VoiceTranscriptionApp:
         - les deux              → texte collé ET conservé dans le presse-papier
         - aucun                 → texte uniquement visible dans la zone de transcription
         """
+        self.text_area.edit_separator()
         self.text_area.insert(tk.END, text + "\n\n")
+        self.text_area.edit_separator()
         self.text_area.see(tk.END)
-
-        self.text_history = []
-        self.history_index = -1
 
         if self.auto_paste_var.get():
             self._paste_when_released(text, time.monotonic() + PASTE_RELEASE_TIMEOUT)
@@ -2069,38 +2072,30 @@ class VoiceTranscriptionApp:
         self.cancel_requested = False
     
     def clear_text(self):
-        """Efface le contenu de la zone de texte"""
-        current_text = self.text_area.get(1.0, tk.END).strip()
-        if current_text:
-            self.text_history.append(current_text)
-            self.history_index = len(self.text_history) - 1
-            if len(self.text_history) > 10:
-                self.text_history.pop(0)
-                self.history_index = len(self.text_history) - 1
-        
+        """Efface le contenu de la zone de texte (Ctrl+Z le rend)"""
+        self.text_area.edit_separator()
         self.text_area.delete(1.0, tk.END)
+        self.text_area.edit_separator()
         self.status_label.config(text="✅ Texte effacé (Ctrl+Z pour annuler)", fg="gray")
         self.root.after(3000, lambda: self.status_label.config(text="Prêt", fg="gray"))
-    
-    def undo_clear(self, event=None):
-        """Restaure le texte précédemment effacé (Ctrl+Z)"""
-        if len(self.text_history) == 0:
-            return None
-        
-        current_text = self.text_area.get(1.0, tk.END).strip()
-        
-        if not current_text and self.history_index >= 0:
-            restored_text = self.text_history[self.history_index]
-            self.text_area.delete(1.0, tk.END)
-            self.text_area.insert(1.0, restored_text)
-            self.status_label.config(text="↩️ Texte restauré", fg="green")
-            self.root.after(2000, lambda: self.status_label.config(text="Prêt", fg="gray"))
-            self.history_index -= 1
-            if self.history_index < 0:
-                self.history_index = -1
-            return "break"  # Empêcher le comportement par défaut de Ctrl+Z
-        
+
+    def undo_text(self, event=None):
+        """Défait la dernière modification de la zone de texte (Ctrl+Z)"""
+        self._step_text(self.text_area.edit_undo, "↩️ Annulé", "Rien à annuler")
         return "break"
+
+    def redo_text(self, event=None):
+        """Refait la dernière modification annulée (Ctrl+Y)"""
+        self._step_text(self.text_area.edit_redo, "↪️ Rétabli", "Rien à rétablir")
+        return "break"
+
+    def _step_text(self, action, done_text, empty_text):
+        try:
+            action()
+            self.status_label.config(text=done_text, fg="green")
+        except tk.TclError:
+            self.status_label.config(text=empty_text, fg="gray")
+        self.root.after(2000, lambda: self.status_label.config(text="Prêt", fg="gray"))
     
     def copy_to_clipboard(self):
         """Copie le contenu de la zone de texte dans le presse-papier"""

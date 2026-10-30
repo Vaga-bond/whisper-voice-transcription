@@ -17,7 +17,7 @@ Pour les modèles OpenAI, la clé API se configure via l'interface (bouton **« 
 
 - **Ctrl+Alt+9** par défaut (pavé numérique ou rangée du haut) : démarre / arrête l'enregistrement, depuis n'importe quelle application. Modifiable — voir ci-dessous.
 - **Échap** pendant l'enregistrement : annule, aucun appel API, aucun coût
-- **Ctrl+Z** dans la fenêtre : restaure le texte effacé
+- **Ctrl+Z / Ctrl+Y** dans la fenêtre : défait / refait la dernière modification de la transcription (collage par-dessus, effacement, frappe), sans limite tant que l'appli reste ouverte
 
 Une fois la transcription terminée, le texte est collé dans le champ actif et/ou copié dans le presse-papier selon les deux toggles indépendants (voir Options).
 
