@@ -48,7 +48,7 @@ LOCAL_MODELS = {
         "Whisper large-v3 turbo local (recommandé)", "handy-computer/whisper-large-v3-turbo-gguf",
         "whisper-large-v3-turbo-Q8_0.gguf", 886),
     "nemotron-3.5-local": LocalModel(
-        "Nemotron 3.5 local (Handy)", "handy-computer/nemotron-3.5-asr-streaming-0.6b-gguf",
+        "Nemotron 3.5 local", "handy-computer/nemotron-3.5-asr-streaming-0.6b-gguf",
         "nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf", 720, streaming=True),
     "qwen3-asr-1.7b-local": LocalModel(
         "Qwen3-ASR 1.7B local", "handy-computer/Qwen3-ASR-1.7B-gguf",
