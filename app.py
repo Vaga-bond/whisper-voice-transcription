@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Application simple de transcription vocale avec OpenAI Whisper
-Interface Tkinter native Windows
+Transcription vocale, locale ou OpenAI, pour Windows et Linux (X11).
+Ce qui dépend du système est dans le paquet `plateforme`.
 """
 
 import tkinter as tk
@@ -15,6 +15,7 @@ import tempfile
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
+import plateforme   # avant pynput : il choisit le moteur clavier sous Linux
 import pyperclip
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -23,9 +24,7 @@ import numpy as np
 import wave
 from pynput import keyboard as pynput_keyboard
 import pygame
-import pyautogui
 
-import clipboard
 from local_engine import (LocalEngine, LOCAL_MODELS, download as download_model, find_model,
                           missing_packages, missing_requirement)
 
@@ -111,27 +110,13 @@ def _build_modifier_map():
 
 MODIFIER_NAMES = _build_modifier_map()
 MODIFIER_ORDER = ('ctrl', 'alt', 'shift', 'win')
-MODIFIER_LABELS = {'ctrl': 'Ctrl', 'alt': 'Alt', 'shift': 'Maj', 'win': 'Win'}
+MODIFIER_LABELS = plateforme.MODIFIER_LABELS
 
-# Libellés des codes de touche virtuels Windows (VK). On raisonne en VK plutôt
-# qu'en caractère : le VK désigne la touche physique, donc le raccourci reste le
-# même quelle que soit la disposition du clavier (AZERTY, QWERTY…).
-VK_LABELS = {
-    8: 'Retour arrière', 9: 'Tab', 13: 'Entrée', 19: 'Pause', 20: 'Verr. Maj',
-    27: 'Échap', 32: 'Espace', 33: 'Page préc.', 34: 'Page suiv.', 35: 'Fin',
-    36: 'Origine', 37: '←', 38: '↑', 39: '→', 40: '↓', 44: 'Impr. écran',
-    45: 'Inser', 46: 'Suppr',
-    106: 'Pavé num *', 107: 'Pavé num +', 109: 'Pavé num -',
-    110: 'Pavé num .', 111: 'Pavé num /',
-}
-VK_LABELS.update({vk: chr(vk) for vk in range(48, 58)})                 # 0-9
-VK_LABELS.update({vk: chr(vk) for vk in range(65, 91)})                 # A-Z
-VK_LABELS.update({vk: 'Pavé num %d' % (vk - 96) for vk in range(96, 106)})
-VK_LABELS.update({vk: 'F%d' % (vk - 111) for vk in range(112, 136)})
+# Une touche est désignée par un code qui suit sa position physique (code VK sous Windows,
+# keycode X sous Linux) : le raccourci reste le même en AZERTY comme en QWERTY. Le champ
+# s'appelle « vks » dans les préférences depuis la version Windows.
 
-SAFE_BARE_VKS = set(range(112, 136))                                    # F1-F24
-
-# Windows réémet « touche enfoncée » tant que la touche reste pressée : sans ces
+# Le système réémet « touche enfoncée » tant que la touche reste pressée : sans ces
 # deux gardes, un appui un peu long bascule deux fois et coupe l'enregistrement.
 HOTKEY_REPEAT_GAP = 1.0      # au-delà, deux appuis ne peuvent plus être une répétition
 HOTKEY_MIN_INTERVAL = 0.35   # intervalle minimum entre deux bascules réelles
@@ -142,21 +127,13 @@ PASTE_KEY_POLL_MS = 10
 PASTE_RELEASE_TIMEOUT = 2.0   # au-delà, le texte attend dans le presse-papier
 # L'application cible lit le presse-papier en traitant Ctrl+V, parfois avec retard.
 CLIPBOARD_RESTORE_DELAY_MS = 300
-# Maj, Ctrl, Alt, Win gauche et droite : enfoncés, ils détournent Ctrl+V.
-MODIFIER_VKS = (0x10, 0x11, 0x12, 0x5B, 0x5C)
-
-DEFAULT_HOTKEY = {
-    'modifiers': ['ctrl', 'alt'],
-    # 9 de la rangée du haut (VK 57) et du pavé numérique (VK 105) : selon le
-    # matériel et le logiciel de macro, l'un ou l'autre est émis.
-    'vks': [57, 105],
-}
+DEFAULT_HOTKEY = plateforme.DEFAULT_HOTKEY
 
 def describe_hotkey(hotkey):
     """Rend un raccourci lisible : {'modifiers': ['ctrl','alt'], 'vks': [57]} -> 'Ctrl+Alt+9'."""
     parts = [MODIFIER_LABELS[m] for m in MODIFIER_ORDER if m in hotkey['modifiers']]
     vks = hotkey['vks']
-    parts.append(VK_LABELS.get(vks[0], 'VK %d' % vks[0]) if vks else '?')
+    parts.append(plateforme.key_label(vks[0]) if vks else '?')
     return '+'.join(parts)
 
 def normalize_hotkey(value):
@@ -187,7 +164,7 @@ DEFAULT_PREFS = {
 
 ENV_FILE = Path(__file__).parent / ".env"
 
-# setup.bat copie .env.example vers .env : OPENAI_API_KEY est donc défini avec la
+# Le script d'installation copie .env.example vers .env : OPENAI_API_KEY est donc défini avec la
 # valeur d'exemple avant toute saisie de clé.
 API_KEY_PLACEHOLDERS = {
     "votre_cle_api_ici", "your_api_key_here", "sk-xxx", "sk-...",
@@ -327,7 +304,7 @@ class FloatingOverlay:
         self.win.withdraw()
         self.handle.withdraw()
 
-        # Les styles Windows exigent que les fenêtres existent déjà côté OS.
+        # La forme et le click-through exigent que les fenêtres existent déjà côté système.
         self.win.update_idletasks()
         self.handle.update_idletasks()
         self._enable_click_through()
@@ -335,51 +312,21 @@ class FloatingOverlay:
         self._apply_circular_shape_to_handle()
 
     def _enable_click_through(self):
-        """Ajoute WS_EX_TRANSPARENT à l'overlay principal (Windows uniquement).
-        Tkinter a déjà posé WS_EX_LAYERED via `-alpha` ; on n'y touche pas pour
-        éviter l'état « fenêtre noire ». SetWindowPos(SWP_FRAMECHANGED) commit la modif."""
+        """Les clics traversent l'overlay principal."""
         try:
-            import ctypes
-            hwnd = int(self.win.wm_frame(), 16)
-            GWL_EXSTYLE = -20
-            WS_EX_TRANSPARENT = 0x00000020
-            SWP_NOMOVE = 0x0002; SWP_NOSIZE = 0x0001; SWP_NOZORDER = 0x0004
-            SWP_FRAMECHANGED = 0x0020
-            user32 = ctypes.windll.user32
-            style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-            user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style | WS_EX_TRANSPARENT)
-            user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0,
-                                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED)
+            plateforme.overlay_click_through(self.win)
         except Exception as e:
             print(f"⚠️ Click-through overlay non activé: {e}")
 
     def _apply_rounded_corners_to_overlay(self):
-        """Applique des coins arrondis via CreateRoundRectRgn (Windows, pas de dep)."""
         try:
-            import ctypes
-            hwnd = int(self.win.wm_frame(), 16)
-            w = self.win.winfo_width()
-            h = self.win.winfo_height()
-            if w <= 1 or h <= 1:
-                return
-            region = ctypes.windll.gdi32.CreateRoundRectRgn(
-                0, 0, w + 1, h + 1, self.CORNER_RADIUS, self.CORNER_RADIUS
-            )
-            ctypes.windll.user32.SetWindowRgn(hwnd, region, True)
+            plateforme.overlay_round_corners(self.win, self.CORNER_RADIUS)
         except Exception as e:
             print(f"⚠️ Arrondi overlay non appliqué: {e}")
 
     def _apply_circular_shape_to_handle(self):
-        """Rend la poignée parfaitement ronde via CreateEllipticRgn."""
         try:
-            import ctypes
-            hwnd = int(self.handle.wm_frame(), 16)
-            w = self.handle.winfo_width()
-            h = self.handle.winfo_height()
-            if w <= 1 or h <= 1:
-                return
-            region = ctypes.windll.gdi32.CreateEllipticRgn(0, 0, w + 1, h + 1)
-            ctypes.windll.user32.SetWindowRgn(hwnd, region, True)
+            plateforme.overlay_circle(self.handle)
         except Exception as e:
             print(f"⚠️ Poignée circulaire non appliquée: {e}")
 
@@ -883,7 +830,7 @@ class VoiceTranscriptionApp:
             self.terminal_paste_checkbox,
             "Par défaut, le collage se fait avec Ctrl+V (fonctionne partout).\n\n"
             "À cocher si vous collez souvent dans un terminal intégré "
-            "(Cursor, VS Code, Windows Terminal…) qui n'accepte que Ctrl+Maj+V. "
+            "(Cursor, VS Code…) qui n'accepte que Ctrl+Maj+V. "
             "Les terminaux autonomes sont détectés automatiquement.\n\n"
             "⚠ Quelques vieilles applications (Notepad) ne reconnaissent pas "
             "Ctrl+Maj+V comme « coller » — à décocher dans ce cas."
@@ -1099,6 +1046,9 @@ class VoiceTranscriptionApp:
                     
                     if any(keyword in name_lower for keyword in exclude_keywords):
                         continue
+
+                    if plateforme.mic_hidden(name):
+                        continue
                     
                     normalized_name = name.strip()
                     if normalized_name.count('(') > normalized_name.count(')'):
@@ -1253,6 +1203,11 @@ class VoiceTranscriptionApp:
         except Exception as e:
             print(f"⚠️ Init pygame mixer échouée: {e}")
 
+        problem = plateforme.environment_problem()
+        if problem:
+            print(f"⚠️ {problem}")
+            messagebox.showwarning("Transcription Vocale", problem)
+
         self.setup_global_hotkey()
         self._setup_tray()
 
@@ -1300,7 +1255,15 @@ class VoiceTranscriptionApp:
                 menu
             )
 
-            self.tray_thread = threading.Thread(target=self.tray_icon.run, daemon=True)
+            def run_tray():
+                # Sans icône, la croix doit quitter : sinon la fenêtre serait cachée sans retour.
+                try:
+                    self.tray_icon.run()
+                except Exception as e:
+                    print(f"⚠️ Icône système arrêtée : {e}")
+                    self.tray_icon = None
+
+            self.tray_thread = threading.Thread(target=run_tray, daemon=True)
             self.tray_thread.start()
             print("✅ Icône système (tray) activée")
         except Exception as e:
@@ -1324,29 +1287,12 @@ class VoiceTranscriptionApp:
         else:
             self._quit_app()
 
-    # Classes de fenêtre natives des terminaux Windows connus. Les terminaux
-    # intégrés des éditeurs Electron (Cursor, VS Code) ne sont PAS ici car ils
-    # partagent la classe de l'éditeur — pour ceux-là, activer le toggle manuel.
-    _TERMINAL_WINDOW_CLASSES = {
-        'CASCADIA_HOSTING_WINDOW_CLASS',   # Windows Terminal
-        'ConsoleWindowClass',              # cmd, PowerShell classique
-        'PuTTY',
-        'mintty',                          # Git Bash, msys2
-    }
-
     def _is_terminal_window_focused(self):
-        """Retourne True si la fenêtre au premier plan est un terminal natif.
-        Ignorer les erreurs : sur non-Windows ou si ctypes échoue, on renvoie False."""
+        """La fenêtre au premier plan est-elle un terminal connu ? En cas d'erreur, non."""
         try:
-            import ctypes
-            user32 = ctypes.windll.user32
-            hwnd = user32.GetForegroundWindow()
-            if not hwnd:
-                return False
-            buf = ctypes.create_unicode_buffer(256)
-            user32.GetClassNameW(hwnd, buf, 256)
-            return buf.value in self._TERMINAL_WINDOW_CLASSES
-        except Exception:
+            return plateforme.terminal_focused()
+        except Exception as e:
+            print(f"⚠️ Fenêtre active illisible : {e}")
             return False
 
     def _on_overlay_toggle(self):
@@ -1974,12 +1920,10 @@ class VoiceTranscriptionApp:
     def _paste_keys_held(self):
         """Un modificateur ou une touche du raccourci est-il encore enfoncé ?"""
         try:
-            import ctypes
-            user32 = ctypes.windll.user32
-        except Exception:
+            return plateforme.keys_held(self.hotkey['vks'])
+        except Exception as e:
+            print(f"⚠️ État du clavier illisible : {e}")
             return False
-        vks = MODIFIER_VKS + tuple(self.hotkey['vks'])
-        return any(user32.GetAsyncKeyState(vk) & 0x8000 for vk in vks)
 
     def _paste_when_released(self, text, deadline):
         """Colle dès que le clavier est libre, sans figer l'interface pendant l'attente."""
@@ -2003,19 +1947,17 @@ class VoiceTranscriptionApp:
         snapshot_error = None
         if not auto_copy:
             try:
-                saved_clipboard = clipboard.snapshot()
+                saved_clipboard = plateforme.clipboard_snapshot()
             except Exception as e:
                 snapshot_error = e
 
         try:
             pyperclip.copy(text)
-            pasted_sequence = clipboard.sequence()
+            pasted_sequence = plateforme.clipboard_sequence()
             # Ctrl+Maj+V si le toggle manuel est actif (terminaux intégrés type
             # Cursor) ou si la fenêtre active est un terminal connu.
-            if self.terminal_paste_var.get() or self._is_terminal_window_focused():
-                pyautogui.hotkey('ctrl', 'shift', 'v')
-            else:
-                pyautogui.hotkey('ctrl', 'v')
+            plateforme.send_paste(self.terminal_paste_var.get()
+                                  or self._is_terminal_window_focused())
             if snapshot_error is not None:
                 print(f"⚠️ Presse-papier non sauvegardé : {snapshot_error}")
                 status_text, status_color = "⚠️ Collé, ancien presse-papier perdu", "orange"
@@ -2023,12 +1965,13 @@ class VoiceTranscriptionApp:
                 status_text, status_color = "✅ Collé et copié", "green"
             else:
                 status_text, status_color = "✅ Collé (presse-papier préservé)", "green"
-        except Exception:
+        except Exception as e:
+            print(f"⚠️ Collage échoué : {e}")
             status_text = "✅ Transcription terminée (collage échoué)"
             status_color = "orange"
             pasted_sequence = None
 
-        if saved_clipboard is not None:
+        if not auto_copy and snapshot_error is None:
             self.root.after(CLIPBOARD_RESTORE_DELAY_MS,
                             self._restore_clipboard, pasted_sequence, saved_clipboard)
         self._finish_transcription(status_text, status_color)
@@ -2036,8 +1979,8 @@ class VoiceTranscriptionApp:
     def _restore_clipboard(self, pasted_sequence, saved):
         """Remet l'ancien presse-papier, sauf si autre chose y a été copié entre-temps."""
         try:
-            if pasted_sequence is None or clipboard.sequence() == pasted_sequence:
-                clipboard.restore(saved)
+            if pasted_sequence is None or plateforme.clipboard_sequence() == pasted_sequence:
+                plateforme.clipboard_restore(saved)
         except Exception as e:
             print(f"⚠️ Presse-papier non rendu : {e}")
             if hasattr(self, 'overlay'):
@@ -2158,7 +2101,7 @@ class VoiceTranscriptionApp:
         """
         held = set()
 
-        def on_press(key):
+        def on_press(key, vk):
             try:
                 modifier = MODIFIER_NAMES.get(key)
                 if modifier:
@@ -2172,7 +2115,6 @@ class VoiceTranscriptionApp:
                     if key == pynput_keyboard.Key.esc:
                         self.root.after(0, self._close_hotkey_dialog)
                     else:
-                        vk = getattr(key, 'vk', None)
                         if vk is not None:
                             self.root.after(0, self._on_capture_key, frozenset(held), vk)
                     return
@@ -2182,37 +2124,32 @@ class VoiceTranscriptionApp:
                         self.root.after(0, self.cancel_recording)
                     return
 
-                vk = getattr(key, 'vk', None)
                 if vk is not None and self._hotkey_matches(vk, held):
                     if self._accept_hotkey_press():
                         self.root.after(0, self.toggle_recording)
             except Exception:
                 pass
 
-        def on_release(key):
+        def on_release(key, vk):
             try:
                 modifier = MODIFIER_NAMES.get(key)
                 if modifier:
                     held.discard(modifier)
                     return
 
-                vk = getattr(key, 'vk', None)
                 if vk is not None and vk in self.hotkey['vks']:
                     self._hotkey_down = False
             except Exception:
                 pass
 
         try:
-            def start_listener():
-                with pynput_keyboard.Listener(on_press=on_press, on_release=on_release) as listener:
-                    listener.join()
-
-            self.hotkey_thread = threading.Thread(target=start_listener, daemon=True)
-            self.hotkey_thread.start()
+            self.hotkey_thread = plateforme.start_key_listener(on_press, on_release)
             print(f"✅ Raccourci {describe_hotkey(self.hotkey)} configuré")
         except Exception as e:
             print(f"⚠️ Impossible de configurer le raccourci: {e}")
-            print("💡 Essayez de lancer l'application en tant qu'administrateur")
+            messagebox.showerror("Raccourci clavier",
+                                 f"Le raccourci global ne fonctionnera pas :\n{e}\n\n"
+                                 f"{plateforme.HOTKEY_FAILURE_HINT}")
 
     def _open_hotkey_dialog(self):
         """Capture une combinaison : les modificateurs s'accumulent, la première touche
@@ -2236,7 +2173,8 @@ class VoiceTranscriptionApp:
 
         tk.Label(
             dialog,
-            text="Maintenez Ctrl, Alt, Maj ou Win, puis appuyez sur la touche finale.",
+            text="Maintenez Ctrl, Alt, Maj ou %s, puis appuyez sur la touche finale."
+                 % MODIFIER_LABELS['win'],
             font=("Arial", 8),
             fg="gray"
         ).pack()
@@ -2293,7 +2231,7 @@ class VoiceTranscriptionApp:
         hotkey = {'modifiers': [m for m in MODIFIER_ORDER if m in held], 'vks': [vk]}
         capture['pending'] = hotkey
         capture['preview'].config(text=describe_hotkey(hotkey))
-        if hotkey['modifiers'] or vk in SAFE_BARE_VKS:
+        if hotkey['modifiers'] or vk in plateforme.SAFE_BARE_CODES:
             capture['warning'].config(text="")
         else:
             capture['warning'].config(

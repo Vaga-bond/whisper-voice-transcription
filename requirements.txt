@@ -4,7 +4,7 @@ pyperclip>=1.8.2
 sounddevice>=0.4.6
 numpy>=1.24.0
 pynput>=1.8.1
-pyautogui>=0.9.54
+pyautogui>=0.9.54; sys_platform == "win32"
 pygame>=2.5.0
 pystray>=0.19.0
 Pillow>=10.0.0

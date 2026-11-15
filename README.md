@@ -1,13 +1,22 @@
 # Transcription Vocale, locale ou OpenAI
 
-Petit outil Windows pour transcrire la voix en texte, sur l'ordinateur (modèles locaux, gratuits) ou via l'API OpenAI. Un raccourci clavier global lance la dictée depuis n'importe quelle application, et le texte est collé directement dans le champ actif. La fenêtre peut tourner réduite dans la barre système.
+Petit outil pour Windows et Linux qui transcrit la voix en texte, sur l'ordinateur (modèles locaux, gratuits) ou via l'API OpenAI. Un raccourci clavier global lance la dictée depuis n'importe quelle application, et le texte est collé directement dans le champ actif. La fenêtre peut tourner réduite dans la barre système.
 
 ## Installation
+
+### Windows
 
 Prérequis : **Python 3.10 ou plus récent**, installé avec l'option « Add Python to PATH » ([python.org/downloads](https://www.python.org/downloads/)).
 
 1. Lancer `setup.bat` (crée l'environnement virtuel et installe les dépendances, moteur local compris)
 2. Lancer `start.bat`
+
+### Linux
+
+Pour Debian, Ubuntu, Linux Mint et leurs dérivés, dans une **session X11** : sous Wayland, le système interdit le raccourci global et le collage automatique (sous Linux Mint, choisir « Cinnamon » et non « Cinnamon sur Wayland » à l'écran de connexion ; `echo $XDG_SESSION_TYPE` doit répondre `x11`).
+
+1. `./setup.sh` : installe les paquets du système (mot de passe administrateur demandé), crée l'environnement virtuel et ajoute **Transcription Vocale** au menu des applications
+2. Lancer depuis le menu, ou `./start.sh` (`./start_console.sh` pour voir les messages de diagnostic)
 
 Le modèle par défaut, **Whisper large-v3 turbo local**, ne demande ni compte ni clé : à la première dictée, l'application propose de télécharger son fichier (≈ 890 Mo). Les autres modèles locaux se téléchargent de la même façon quand on les choisit. La carte graphique est utilisée par son pilote habituel (Vulkan, présent avec les pilotes NVIDIA, AMD et Intel récents) ; sans carte graphique compatible, le processeur prend le relais, plus lentement.
 
@@ -23,7 +32,7 @@ Le texte transcrit est collé dans le champ actif et/ou copié dans le presse-pa
 
 ### Changer le raccourci
 
-Panneau d'options → **« Modifier le raccourci… »**, puis appuyer sur la combinaison voulue : une ou plusieurs touches parmi **Ctrl, Alt, Maj ou Win**, puis la touche finale. La touche est mémorisée par sa position physique : le raccourci reste le même en AZERTY comme en QWERTY.
+Panneau d'options → **« Modifier le raccourci… »**, puis appuyer sur la combinaison voulue : une ou plusieurs touches parmi **Ctrl, Alt, Maj ou Win** (Super sous Linux), puis la touche finale. La touche est mémorisée par sa position physique : le raccourci reste le même en AZERTY comme en QWERTY.
 
 Une touche seule, sans Ctrl ni Alt, est acceptée, mais elle se déclenche aussi pendant la frappe ; l'application le signale. Les touches F1 à F12 et celles du pavé numérique n'ont pas ce problème.
 
@@ -69,9 +78,9 @@ Un modèle absent est proposé au téléchargement quand on le choisit ou qu'on 
 - Couleur selon l'état, position mémorisée, visible même quand l'application est réduite ; désactivable
 
 ### Copie et collage
-- **Copier** et **Coller dans le champ actif** sont indépendants. Coller sans copier est possible : le presse-papier d'origine, images et fichiers compris, est restauré 0,3 seconde après, sauf si autre chose y a été copié entre-temps.
+- **Copier** et **Coller dans le champ actif** sont indépendants. Coller sans copier est possible : le presse-papier d'origine, images et fichiers compris, est restauré 0,3 seconde après, sauf si autre chose y a été copié entre-temps. Sous Linux, il est rendu dans un seul format, le plus utile : l'image, sinon les fichiers, sinon le texte (le texte mis en forme revient en texte simple).
 - Le collage attend que les touches du raccourci soient relâchées ; au-delà de 2 secondes, le texte reste dans le presse-papier sans être collé.
-- Les terminaux natifs (Windows Terminal, cmd, PuTTY, mintty) sont détectés et reçoivent `Ctrl+Maj+V` ; l'option **« Coller pour terminal »** couvre les terminaux intégrés aux éditeurs (Cursor, VS Code…).
+- Les terminaux sont détectés et reçoivent `Ctrl+Maj+V` : Windows Terminal, cmd, PuTTY et mintty sous Windows ; GNOME Terminal, Tilix, Terminator, Konsole, Kitty, Alacritty et les autres terminaux courants sous Linux ; l'option **« Coller pour terminal »** couvre les terminaux intégrés aux éditeurs (Cursor, VS Code…).
 
 ### Suivi des coûts
 - Session et mois en cours, avec le détail par modèle au survol du **`?`**
@@ -86,13 +95,14 @@ Un modèle absent est proposé au téléchargement quand on le choisit ou qu'on 
 
 ## Dépendances
 
-Installées par `setup.bat` ; versions dans `requirements.txt`.
+Installées par `setup.bat` ou `setup.sh` ; versions dans `requirements.txt`.
 
 - `openai`, `python-dotenv` : API OpenAI et fichier `.env`
 - `transcribe-cpp`, `soxr` : modèles locaux et rééchantillonnage du micro à 16 kHz
 - `sounddevice`, `numpy` : capture audio
 - `pynput` : raccourci clavier global
-- `pyperclip`, `pyautogui` : presse-papier et frappes
+- `pyperclip` : presse-papier ; `pyautogui` : frappes sous Windows
+- Sous Linux, paquets du système installés par `setup.sh` : `xclip` (presse-papier), `python3-tk`, `libportaudio2`, `python3-gi` et AyatanaAppIndicator (icône de la barre système), pilotes Vulkan
 - `pygame` : sons
 - `pystray`, `Pillow` : icône de la barre système (facultatives)
 
@@ -100,12 +110,13 @@ Installées par `setup.bat` ; versions dans `requirements.txt`.
 
 - `app.py` : application principale
 - `local_engine.py` : transcription locale
-- `clipboard.py` : sauvegarde et restauration du presse-papier dans tous ses formats
+- `plateforme/` : ce qui dépend du système, un module par système avec les mêmes fonctions (`windows.py`, `linux.py`) : clavier, presse-papier, fenêtre active, forme de l'overlay
 - `models/` : fichiers des modèles locaux (non versionné)
 - `.env` : clé API (non versionné)
 - `sounds/` : sons
 - `transcription_history.json`, `user_preferences.json` : historique et préférences (locaux, non versionnés)
-- `setup.bat`, `start.bat`, `start_console.bat` : installation et lancement
+- `setup.bat`, `start.bat`, `start_console.bat` : installation et lancement sous Windows
+- `setup.sh`, `start.sh`, `start_console.sh` : installation et lancement sous Linux
 - `LICENSE` : licence MIT
 
 ## Remerciements

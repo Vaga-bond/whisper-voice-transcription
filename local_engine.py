@@ -84,8 +84,8 @@ def missing_packages():
     absent = [p for p, mod in (("transcribe-cpp", "transcribe_cpp"), ("soxr", "soxr"))
               if importlib.util.find_spec(mod) is None]
     if absent:
-        return ("Paquets manquants : %s.\nRelancez setup.bat ou installez-les avec "
-                "« pip install -r requirements.txt »." % ", ".join(absent))
+        return ("Paquets manquants : %s.\nRelancez setup.bat (Windows) ou setup.sh (Linux), "
+                "ou installez-les avec « pip install -r requirements.txt »." % ", ".join(absent))
     return None
 
 
