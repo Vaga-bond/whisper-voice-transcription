@@ -38,6 +38,8 @@ Une touche seule, sans Ctrl ni Alt, est acceptée, mais elle se déclenche aussi
 
 Le raccourci est écouté au niveau du système : clavier, souris à macros, pédale ou StreamDeck le déclenchent de la même façon.
 
+Sous Linux, le raccourci est en plus **réservé** à l'application : la touche lance la dictée sans parvenir à la fenêtre active (le 9 du pavé numérique ne s'écrit plus nulle part), et une touche seule devient utilisable. Un **bouton latéral de la souris** (arrière, avant ou suivants), seul ou avec Ctrl, Alt, Maj ou Super, peut aussi servir de raccourci, sans outil tiers ; il perd alors son effet habituel. Si une autre application ou un raccourci du système tient déjà la combinaison, l'application le signale.
+
 ## Modèles
 
 Neuf modèles au choix, le dernier choisi est gardé d'une session à l'autre.

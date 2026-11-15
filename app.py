@@ -133,13 +133,24 @@ def describe_hotkey(hotkey):
     """Rend un raccourci lisible : {'modifiers': ['ctrl','alt'], 'vks': [57]} -> 'Ctrl+Alt+9'."""
     parts = [MODIFIER_LABELS[m] for m in MODIFIER_ORDER if m in hotkey['modifiers']]
     vks = hotkey['vks']
-    parts.append(plateforme.key_label(vks[0]) if vks else '?')
+    if hotkey.get('button'):
+        parts.append(plateforme.button_label(hotkey['button']))
+    else:
+        parts.append(plateforme.key_label(vks[0]) if vks else '?')
     return '+'.join(parts)
 
 def normalize_hotkey(value):
-    """Valide un raccourci lu depuis les préférences, sinon retourne le défaut."""
+    """Valide un raccourci lu depuis les préférences, sinon retourne le défaut.
+
+    Un bouton de souris est noté {'button': 8} avec 'vks' vide : sur un système sans souris
+    pour le raccourci, il retombe sur le défaut."""
     try:
         modifiers = [m for m in MODIFIER_ORDER if m in value['modifiers']]
+        button = value.get('button')
+        if button is not None and plateforme.SUPPORTS_MOUSE:
+            button = int(button)
+            if plateforme.MOUSE_BUTTON_MIN <= button <= plateforme.MOUSE_BUTTON_MAX:
+                return {'modifiers': modifiers, 'vks': [], 'button': button}
         vks = [int(v) for v in value['vks'] if 0 < int(v) < 256]
         if vks:
             return {'modifiers': modifiers, 'vks': vks}
@@ -2065,6 +2076,24 @@ class VoiceTranscriptionApp:
             self.hotkey_label.config(text=self._hotkey_banner())
         if hasattr(self, 'hotkey_pref_label'):
             self.hotkey_pref_label.config(text=describe_hotkey(hotkey))
+        self._grab_hotkey(notify=True)
+
+    def _grab_hotkey(self, notify=False):
+        """Réserve le raccourci au système (Linux) : la touche ne s'écrit plus ailleurs."""
+        problem = plateforme.grab_hotkey(self.hotkey, self._on_hotkey_button)
+        if problem:
+            print(f"⚠️ {problem}")
+            if notify:
+                messagebox.showwarning("Raccourci", problem)
+
+    def _on_hotkey_button(self, button, pressed):
+        """Clic du bouton de souris réservé (appelé hors du fil de Tk)."""
+        if button != self.hotkey.get('button'):
+            return
+        if not pressed:
+            self._hotkey_down = False
+        elif self._hotkey_capture is None and self._accept_hotkey_press():
+            self.root.after(0, self.toggle_recording)
 
     def _accept_hotkey_press(self):
         """Filtre les répétitions du système : seule une transition relâché → enfoncé bascule."""
@@ -2135,6 +2164,8 @@ class VoiceTranscriptionApp:
                 modifier = MODIFIER_NAMES.get(key)
                 if modifier:
                     held.discard(modifier)
+                    if self._hotkey_capture is not None:
+                        self.root.after(0, self._on_capture_modifiers, frozenset(held))
                     return
 
                 if vk is not None and vk in self.hotkey['vks']:
@@ -2144,6 +2175,7 @@ class VoiceTranscriptionApp:
 
         try:
             self.hotkey_thread = plateforme.start_key_listener(on_press, on_release)
+            self._grab_hotkey()
             print(f"✅ Raccourci {describe_hotkey(self.hotkey)} configuré")
         except Exception as e:
             print(f"⚠️ Impossible de configurer le raccourci: {e}")
@@ -2159,7 +2191,7 @@ class VoiceTranscriptionApp:
 
         dialog = tk.Toplevel(self.root)
         dialog.title("Modifier le raccourci")
-        dialog.geometry("440x260")
+        dialog.geometry("440x280")
         dialog.transient(self.root)
         dialog.grab_set()
         dialog.resizable(False, False)
@@ -2173,10 +2205,12 @@ class VoiceTranscriptionApp:
 
         tk.Label(
             dialog,
-            text="Maintenez Ctrl, Alt, Maj ou %s, puis appuyez sur la touche finale."
-                 % MODIFIER_LABELS['win'],
+            text="Maintenez Ctrl, Alt, Maj ou %s, puis appuyez sur la touche finale%s."
+                 % (MODIFIER_LABELS['win'],
+                    " ou sur un bouton latéral de la souris" if plateforme.SUPPORTS_MOUSE else ""),
             font=("Arial", 8),
-            fg="gray"
+            fg="gray",
+            wraplength=400
         ).pack()
 
         preview = tk.Label(dialog, text="…", font=("Arial", 14, "bold"), fg="#1565c0")
@@ -2207,37 +2241,68 @@ class VoiceTranscriptionApp:
             command=self._reset_hotkey
         ).pack()
 
+        mouse = None
+        if plateforme.SUPPORTS_MOUSE:
+            def on_click(button, pressed):
+                if pressed and button >= plateforme.MOUSE_BUTTON_MIN:
+                    self.root.after(0, self._on_capture_button, button)
+            try:
+                mouse = plateforme.start_mouse_listener(on_click)
+            except Exception as e:
+                print(f"⚠️ Écoute de la souris impossible : {e}")
+
         self._hotkey_capture = {
             'dialog': dialog,
             'preview': preview,
             'warning': warning,
             'validate': validate,
             'pending': None,
+            'held': frozenset(),
+            'mouse': mouse,
         }
 
     def _on_capture_modifiers(self, held):
         """Aperçu vivant tant que l'utilisateur n'a pas figé la combinaison."""
         capture = self._hotkey_capture
-        if capture is None or capture['pending'] is not None:
+        if capture is None:
+            return
+        capture['held'] = held
+        if capture['pending'] is not None:
             return
         parts = [MODIFIER_LABELS[m] for m in MODIFIER_ORDER if m in held]
         capture['preview'].config(text='+'.join(parts + ['…']) if parts else '…')
 
     def _on_capture_key(self, held, vk):
         """Fige la combinaison sur la première touche non-modificateur."""
+        if self._hotkey_capture is None:
+            return
+        hotkey = {'modifiers': [m for m in MODIFIER_ORDER if m in held], 'vks': [vk]}
+        if hotkey['modifiers']:
+            warning = ""
+        elif plateforme.GRABS_HOTKEY:
+            warning = plateforme.BARE_KEY_WARNING
+        elif vk in plateforme.SAFE_BARE_CODES:
+            warning = ""
+        else:
+            warning = ("Cette touche seule se déclenchera aussi pendant que vous "
+                       "tapez du texte. Ajoutez Ctrl ou Alt pour l'éviter.")
+        self._show_captured(hotkey, warning)
+
+    def _on_capture_button(self, button):
+        """Fige la combinaison sur un bouton de souris, avec les modificateurs tenus."""
         capture = self._hotkey_capture
         if capture is None:
             return
-        hotkey = {'modifiers': [m for m in MODIFIER_ORDER if m in held], 'vks': [vk]}
+        held = capture['held']
+        hotkey = {'modifiers': [m for m in MODIFIER_ORDER if m in held], 'vks': [],
+                  'button': button}
+        self._show_captured(hotkey, "" if hotkey['modifiers'] else plateforme.BARE_BUTTON_WARNING)
+
+    def _show_captured(self, hotkey, warning):
+        capture = self._hotkey_capture
         capture['pending'] = hotkey
         capture['preview'].config(text=describe_hotkey(hotkey))
-        if hotkey['modifiers'] or vk in plateforme.SAFE_BARE_CODES:
-            capture['warning'].config(text="")
-        else:
-            capture['warning'].config(
-                text="Cette touche seule se déclenchera aussi pendant que vous "
-                     "tapez du texte. Ajoutez Ctrl ou Alt pour l'éviter."
-            )
+        capture['warning'].config(text=warning)
         capture['validate'].config(state=tk.NORMAL)
 
     def _confirm_hotkey(self):
@@ -2260,6 +2325,8 @@ class VoiceTranscriptionApp:
         if capture is None:
             return
         self._hotkey_capture = None
+        if capture['mouse'] is not None:
+            capture['mouse'].stop()
         try:
             capture['dialog'].grab_release()
             capture['dialog'].destroy()

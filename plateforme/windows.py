@@ -73,6 +73,15 @@ def keys_held(codes):
     return any(_user32.GetAsyncKeyState(vk) & 0x8000 for vk in _MODIFIER_VKS + tuple(codes))
 
 
+# Sous Windows, le raccourci n'est pas réservé et la souris n'est pas proposée.
+GRABS_HOTKEY = False
+SUPPORTS_MOUSE = False
+
+
+def grab_hotkey(hotkey, on_button=None):
+    return None
+
+
 def send_paste(terminal):
     """Envoie Ctrl+V, ou Ctrl+Maj+V pour un terminal."""
     if terminal:
