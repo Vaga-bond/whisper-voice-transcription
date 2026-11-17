@@ -67,6 +67,9 @@ DEFAULT_HOTKEY = {
     # 9 de la rangée du haut (18) et du pavé numérique (81).
     'vks': [18, 81],
 }
+# Met le raccourci en pause et l'en sort : Ctrl + 9 du pavé numérique seulement, Ctrl + 9
+# de la rangée du haut servant aux navigateurs (dernier onglet).
+DEFAULT_PAUSE_HOTKEY = {'modifiers': ['ctrl'], 'vks': [81]}
 
 _MODIFIER_KEYSYMS = ('Control_L', 'Control_R', 'Alt_L', 'Alt_R', 'Shift_L', 'Shift_R',
                      'Super_L', 'Super_R', 'Meta_L', 'Meta_R', 'ISO_Level3_Shift')
@@ -224,7 +227,26 @@ class _Grabber(threading.Thread):
                  'win': mask_of('Super_L', 'Super_R') or Xlib.X.Mod4Mask}
         return masks, mask_of('Num_Lock')
 
-    def set(self, hotkey, on_button):
+    def _combos(self, hotkey, masks, locks):
+        """Masques X sous lesquels réserver un raccourci."""
+        required = 0
+        for name in hotkey['modifiers']:
+            required |= masks[name]
+        # Comme l'écoute, un raccourci avec modificateurs accepte des modificateurs en plus
+        # (certaines macros ajoutent Maj) ; une touche seule n'en accepte aucun. Le raccourci
+        # de pause, lui, veut ses modificateurs exacts.
+        extra = [masks[m] for m in _GRAB_MODIFIERS if m not in hotkey['modifiers']] \
+            if hotkey['modifiers'] and not hotkey.get('exact') else []
+        combos = set()
+        for subset in range(1 << len(extra)):
+            mask = required
+            for i, m in enumerate(extra):
+                if subset >> i & 1:
+                    mask |= m
+            combos.update(mask | lock for lock in locks)
+        return combos
+
+    def set(self, hotkeys, on_button):
         for kind, code, mask in self.grabbed:
             if kind == 'key':
                 self.root.ungrab_key(code, mask)
@@ -237,37 +259,25 @@ class _Grabber(threading.Thread):
         # Verr. Maj et Verr. Num comptent comme des modificateurs pour X : chaque
         # combinaison est réservée avec et sans eux.
         locks = {0, Xlib.X.LockMask, numlock, Xlib.X.LockMask | numlock}
-        required = 0
-        for name in hotkey['modifiers']:
-            required |= masks[name]
-        # Comme l'écoute, un raccourci avec modificateurs accepte des modificateurs en plus
-        # (certaines macros ajoutent Maj) ; une touche seule n'en accepte aucun.
-        extra = [masks[m] for m in _GRAB_MODIFIERS if m not in hotkey['modifiers']] \
-            if hotkey['modifiers'] else []
-        combos = set()
-        for subset in range(1 << len(extra)):
-            mask = required
-            for i, m in enumerate(extra):
-                if subset >> i & 1:
-                    mask |= m
-            combos.update(mask | lock for lock in locks)
+        grabs = []
+        for hotkey in hotkeys:
+            combos = self._combos(hotkey, masks, locks)
+            if hotkey.get('button'):
+                grabs += [('button', hotkey['button'], mask) for mask in combos]
+            else:
+                grabs += [('key', code, mask) for code in hotkey['vks'] for mask in combos]
 
-        if hotkey.get('button'):
-            targets = [('button', hotkey['button'])]
-        else:
-            targets = [('key', code) for code in hotkey['vks']]
         catch = Xlib.error.CatchError(Xlib.error.BadAccess)
-        for kind, code in targets:
-            for mask in combos:
-                if kind == 'key':
-                    self.root.grab_key(code, mask, False, Xlib.X.GrabModeAsync,
-                                       Xlib.X.GrabModeAsync, onerror=catch)
-                else:
-                    self.root.grab_button(code, mask, False,
-                                          Xlib.X.ButtonPressMask | Xlib.X.ButtonReleaseMask,
-                                          Xlib.X.GrabModeAsync, Xlib.X.GrabModeAsync,
-                                          Xlib.X.NONE, Xlib.X.NONE, onerror=catch)
-                self.grabbed.append((kind, code, mask))
+        for kind, code, mask in grabs:
+            if kind == 'key':
+                self.root.grab_key(code, mask, False, Xlib.X.GrabModeAsync,
+                                   Xlib.X.GrabModeAsync, onerror=catch)
+            else:
+                self.root.grab_button(code, mask, False,
+                                      Xlib.X.ButtonPressMask | Xlib.X.ButtonReleaseMask,
+                                      Xlib.X.GrabModeAsync, Xlib.X.GrabModeAsync,
+                                      Xlib.X.NONE, Xlib.X.NONE, onerror=catch)
+            self.grabbed.append((kind, code, mask))
         self.display.sync()
         if catch.get_error():
             return ("Ce raccourci est déjà réservé par une autre application ou par un "
@@ -279,14 +289,15 @@ class _Grabber(threading.Thread):
 _grabber = None
 
 
-def grab_hotkey(hotkey, on_button=None):
-    """Réserve le raccourci à l'application ; on_button(bouton, enfoncé) reçoit les clics du
-    bouton réservé. Renvoie None, ou la raison pour laquelle la réservation a échoué."""
+def grab_hotkeys(hotkeys, on_button=None):
+    """Réserve les raccourcis à l'application ; on_button(bouton, enfoncé) reçoit les clics du
+    bouton réservé. Un raccourci marqué 'exact' n'accepte pas de modificateur en plus.
+    Renvoie None, ou la raison pour laquelle la réservation a échoué."""
     global _grabber
     try:
         if _grabber is None:
             _grabber = _Grabber()
-        return _grabber.call(lambda: _grabber.set(hotkey, on_button))
+        return _grabber.call(lambda: _grabber.set(hotkeys, on_button))
     except Exception as e:
         return f"Réservation du raccourci impossible : {e}"
 

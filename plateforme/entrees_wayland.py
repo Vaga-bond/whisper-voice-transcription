@@ -13,10 +13,13 @@ même nom et les mêmes identifiants, pour que KDE lui applique les mêmes régl
 part de l'application : une transcription qui occupe Python ne ralentit jamais la frappe, et
 s'il s'arrête, le noyau rend aussitôt les périphériques.
 
-Il lit sur son entrée la réservation voulue, une ligne JSON :
+Il lit sur son entrée les réservations voulues, une liste JSON par ligne :
 
-    {"modifiers": ["ctrl", "alt"], "key": <keycode X>}   ou   {"modifiers": [], "button": 8}
-    null : rien de réservé
+    [{"modifiers": ["ctrl", "alt"], "key": <keycode X>}, {"modifiers": [], "button": 8}]
+    [] : rien de réservé
+
+Une réservation avec modificateurs accepte des modificateurs en plus, comme sous X11, sauf si
+elle est marquée "exact": true ; une touche seule n'en accepte aucun.
 
 Il s'arrête quand son entrée se ferme, c'est-à-dire quand l'application se termine.
 """
@@ -108,7 +111,7 @@ class Listener:
         self.selector = selectors.DefaultSelector()
         self.devices = {}          # chemin -> Device
         self.held = set()          # touches enfoncées, tous claviers confondus
-        self.reserve = None        # (modificateurs requis, code evdev visé)
+        self.reserves = []         # (modificateurs requis, exacts ?, code evdev visé)
         self.pending = False       # une prise ou un retour attend qu'on relâche les touches
         self.denied = False
         self.stdin_buffer = b''
@@ -167,9 +170,9 @@ class Listener:
     def apply_reserve(self):
         """Prend les périphériques qui portent la touche réservée, rend les autres."""
         self.pending = False
-        target = self.reserve[1] if self.reserve else None
+        targets = {code for _, _, code in self.reserves}
         for device in list(self.devices.values()):
-            want = target is not None and target in device.keys
+            want = bool(targets & device.keys)
             if want == (device.clone is not None):
                 continue
             if device.busy():
@@ -182,16 +185,17 @@ class Listener:
 
     # ── Événements ──────────────────────────────────────────────────────────
 
-    def modifiers_match(self, required):
+    def modifiers_match(self, required, exact):
         held = {name for name, codes in MODIFIERS.items() if self.held & codes}
-        return required <= held if required else not held
+        if exact or not required:
+            return held == required
+        return required <= held
 
     def swallow(self, device, event):
-        """L'événement est-il le raccourci réservé, à ne pas rejouer ?"""
-        if self.reserve is None or event.code != self.reserve[1]:
-            return False
+        """L'événement est-il un raccourci réservé, à ne pas rejouer ?"""
         if event.value == 1:
-            if self.modifiers_match(self.reserve[0]):
+            if any(code == event.code and self.modifiers_match(required, exact)
+                   for required, exact, code in self.reserves):
                 device.swallowed.add(event.code)
                 return True
             return False
@@ -249,17 +253,18 @@ class Listener:
         *lines, self.stdin_buffer = self.stdin_buffer.split(b'\n')
         for line in lines:
             try:
-                wanted = json.loads(line)
+                wanted = json.loads(line) or []
             except ValueError:
                 continue
-            if not wanted:
-                self.reserve = None
-            elif wanted.get('button'):
-                code = int(wanted['button']) - X_FIRST_SIDE_BUTTON + ecodes.BTN_SIDE
-                self.reserve = (frozenset(wanted.get('modifiers') or ()), code)
-            else:
-                code = int(wanted['key']) - X_OFFSET
-                self.reserve = (frozenset(wanted.get('modifiers') or ()), code)
+            reserves = []
+            for item in wanted:
+                if item.get('button'):
+                    code = int(item['button']) - X_FIRST_SIDE_BUTTON + ecodes.BTN_SIDE
+                else:
+                    code = int(item['key']) - X_OFFSET
+                reserves.append((frozenset(item.get('modifiers') or ()),
+                                 bool(item.get('exact')), code))
+            self.reserves = reserves
             self.apply_reserve()
 
     def run(self):

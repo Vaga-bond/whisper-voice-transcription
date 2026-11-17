@@ -30,7 +30,8 @@ from evdev import ecodes
 from pynput import keyboard as pynput_keyboard
 
 from .linux import (  # noqa: F401  (réexportés pour app.py)
-    BARE_BUTTON_WARNING, BARE_KEY_WARNING, DEFAULT_HOTKEY, MODIFIER_LABELS, MOUSE_BUTTON_MAX,
+    BARE_BUTTON_WARNING, BARE_KEY_WARNING, DEFAULT_HOTKEY, DEFAULT_PAUSE_HOTKEY,
+    MODIFIER_LABELS, MOUSE_BUTTON_MAX,
     MOUSE_BUTTON_MIN, SAFE_BARE_CODES, _TERMINAL_CLASSES, _display_lock, _x, button_label,
     key_label, mic_hidden, overlay_circle, overlay_click_through, overlay_round_corners,
 )
@@ -74,7 +75,7 @@ class _Entrees:
         self.held = set()                 # keycodes X enfoncés
         self.key_handlers = []            # (on_press, on_release)
         self.mouse_handlers = []          # on_click(bouton, enfoncé)
-        self.reserved = None              # raccourci réservé
+        self.button_hotkey = None         # raccourci réservé sur un bouton de souris
         self.on_button = None
         self.button_down = False
         self.denied = False
@@ -120,8 +121,8 @@ class _Entrees:
     def _on_button(self, button, pressed):
         for on_click in list(self.mouse_handlers):
             on_click(button, pressed)
-        hotkey = self.reserved
-        if self.on_button is None or not hotkey or hotkey.get('button') != button:
+        hotkey = self.button_hotkey
+        if self.on_button is None or not hotkey or hotkey['button'] != button:
             return
         # Comme le bouton réservé sous X11 : l'appui compte avec les bons modificateurs,
         # et son relâchement suit toujours.
@@ -132,14 +133,16 @@ class _Entrees:
             self.button_down = False
             self.on_button(button, False)
 
-    def reserve(self, hotkey, on_button):
-        self.reserved, self.on_button = hotkey, on_button
-        if hotkey.get('button'):
-            wanted = {'modifiers': hotkey['modifiers'], 'button': hotkey['button']}
-        elif hotkey.get('vks'):
-            wanted = {'modifiers': hotkey['modifiers'], 'key': hotkey['vks'][0]}
-        else:
-            wanted = None
+    def reserve(self, hotkeys, on_button):
+        self.on_button = on_button
+        self.button_hotkey = next((h for h in hotkeys if h.get('button')), None)
+        wanted = []
+        for hotkey in hotkeys:
+            base = {'modifiers': hotkey['modifiers'], 'exact': bool(hotkey.get('exact'))}
+            if hotkey.get('button'):
+                wanted.append(dict(base, button=hotkey['button']))
+            else:
+                wanted += [dict(base, key=code) for code in hotkey['vks']]
         self.process.stdin.write(json.dumps(wanted) + '\n')
         self.process.stdin.flush()
 
@@ -190,11 +193,12 @@ def keys_held(codes):
     return bool(held & (_ALL_MODIFIER_CODES | set(codes)))
 
 
-def grab_hotkey(hotkey, on_button=None):
-    """Réserve le raccourci à l'application ; on_button(bouton, enfoncé) reçoit les clics du
-    bouton réservé. Renvoie None, ou la raison pour laquelle la réservation a échoué."""
+def grab_hotkeys(hotkeys, on_button=None):
+    """Réserve les raccourcis à l'application ; on_button(bouton, enfoncé) reçoit les clics du
+    bouton réservé. Un raccourci marqué 'exact' n'accepte pas de modificateur en plus.
+    Renvoie None, ou la raison pour laquelle la réservation a échoué."""
     try:
-        _get_entrees().reserve(hotkey, on_button)
+        _get_entrees().reserve(hotkeys, on_button)
     except Exception as e:
         return f"Réservation du raccourci impossible : {e}"
     return None

@@ -42,6 +42,9 @@ DEFAULT_HOTKEY = {
     # matériel et le logiciel de macro, l'un ou l'autre est émis.
     'vks': [57, 105],
 }
+# Met le raccourci en pause et l'en sort : Ctrl + 9 du pavé numérique seulement, Ctrl + 9
+# de la rangée du haut servant aux navigateurs (dernier onglet).
+DEFAULT_PAUSE_HOTKEY = {'modifiers': ['ctrl'], 'vks': [105]}
 
 # Maj, Ctrl, Alt, Win gauche et droite : enfoncés, ils détournent Ctrl+V.
 _MODIFIER_VKS = (0x10, 0x11, 0x12, 0x5B, 0x5C)
@@ -78,7 +81,7 @@ GRABS_HOTKEY = False
 SUPPORTS_MOUSE = False
 
 
-def grab_hotkey(hotkey, on_button=None):
+def grab_hotkeys(hotkeys, on_button=None):
     return None
 
 

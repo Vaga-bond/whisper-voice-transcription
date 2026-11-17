@@ -66,6 +66,23 @@ Categories=Utility;Accessibility;
 EOF
 
 echo
+echo "Lancement à l'ouverture de session, rangée dans la barre système..."
+# Pour l'arrêter : Configuration du système > Démarrage automatique (KDE), ou supprimer ce
+# fichier.
+mkdir -p "$HOME/.config/autostart"
+cat > "$HOME/.config/autostart/transcription-vocale.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Transcription Vocale
+Comment=Dictée vocale, rangée dans la barre système
+Exec="$APP_DIR/start.sh" --barre
+Path=$APP_DIR
+Icon=audio-input-microphone
+Terminal=false
+X-GNOME-Autostart-enabled=true
+EOF
+
+echo
 echo "Installation terminée."
 echo
 if [ "$NEW_SESSION_NEEDED" = 1 ]; then

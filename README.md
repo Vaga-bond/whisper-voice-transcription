@@ -15,7 +15,7 @@ Prérequis : **Python 3.10 ou plus récent**, installé avec l'option « Add Pyt
 
 Pour Debian, Ubuntu, Linux Mint, Kubuntu et leurs dérivés, en session **X11** ou **Wayland** : l'application choisit d'elle-même.
 
-1. `./setup.sh` : installe les paquets du système (mot de passe administrateur demandé), crée l'environnement virtuel et ajoute **Transcription Vocale** au menu des applications
+1. `./setup.sh` : installe les paquets du système (mot de passe administrateur demandé), crée l'environnement virtuel, ajoute **Transcription Vocale** au menu des applications et la lance à chaque ouverture de session, rangée dans la barre système (`./start.sh --barre` ; à désactiver dans les réglages du démarrage automatique)
 2. Sous Wayland, la première fois seulement : fermer la session et la rouvrir
 3. Lancer depuis le menu, ou `./start.sh` (`./start_console.sh` pour voir les messages de diagnostic)
 
@@ -29,6 +29,7 @@ Pour les modèles OpenAI, la clé API se configure dans l'interface (bouton **«
 
 - **Ctrl+Alt+9** par défaut (pavé numérique ou rangée du haut) : démarre et arrête l'enregistrement, depuis n'importe quelle application
 - **Échap** pendant l'enregistrement : annule, sans appel ni coût
+- **Ctrl + 9 du pavé numérique** par défaut : met le raccourci de dictée en pause, et l'en sort. En pause, la touche ou le bouton de souris du raccourci retrouve son effet habituel (dans un jeu, par exemple) ; l'icône de la barre système passe du vert au gris barré. Se règle dans le panneau d'options (**« Modifier la pause… »**) ou par le menu de l'icône, et reste mémorisé d'une session à l'autre
 - **Ctrl+Z / Ctrl+Y** dans la fenêtre : défait et refait les modifications de la transcription, sans limite tant que l'application reste ouverte
 
 Le texte transcrit est collé dans le champ actif et/ou copié dans le presse-papier, selon deux options indépendantes. La croix de la fenêtre réduit l'application dans la barre système (configurable) ; clic droit sur l'icône pour **Afficher** ou **Quitter**.

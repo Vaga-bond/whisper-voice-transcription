@@ -89,6 +89,9 @@ def compute_transcription_cost(model, usage, duration_sec):
 
 HISTORY_FILE = Path(__file__).parent / "transcription_history.json"
 
+# Option de lancement : démarrer rangée dans la barre système, sans ouvrir la fenêtre.
+START_IN_TRAY = "--barre" in sys.argv[1:]
+
 PREFS_FILE = Path(__file__).parent / "user_preferences.json"
 
 
@@ -139,8 +142,8 @@ def describe_hotkey(hotkey):
         parts.append(plateforme.key_label(vks[0]) if vks else '?')
     return '+'.join(parts)
 
-def normalize_hotkey(value):
-    """Valide un raccourci lu depuis les préférences, sinon retourne le défaut.
+def normalize_hotkey(value, default=DEFAULT_HOTKEY):
+    """Valide un raccourci lu depuis les préférences, sinon retourne `default`.
 
     Un bouton de souris est noté {'button': 8} avec 'vks' vide : sur un système sans souris
     pour le raccourci, il retombe sur le défaut."""
@@ -156,8 +159,7 @@ def normalize_hotkey(value):
             return {'modifiers': modifiers, 'vks': vks}
     except (KeyError, TypeError, ValueError):
         pass
-    return {'modifiers': list(DEFAULT_HOTKEY['modifiers']),
-            'vks': list(DEFAULT_HOTKEY['vks'])}
+    return {'modifiers': list(default['modifiers']), 'vks': list(default['vks'])}
 
 DEFAULT_PREFS = {
     "selected_model": "whisper-large-v3-turbo-local",
@@ -171,6 +173,8 @@ DEFAULT_PREFS = {
     "terminal_paste": False,
     "overlay_position": None,
     "hotkey": DEFAULT_HOTKEY,
+    "pause_hotkey": plateforme.DEFAULT_PAUSE_HOTKEY,
+    "hotkey_paused": False,
 }
 
 ENV_FILE = Path(__file__).parent / ".env"
@@ -548,6 +552,12 @@ class VoiceTranscriptionApp:
         self.max_recording_duration = int(self.prefs.get("max_recording_duration", 240))
 
         self.hotkey = normalize_hotkey(self.prefs.get("hotkey"))
+        # Raccourci de pause : clavier seulement, modificateurs exacts (Ctrl+9 ne doit pas
+        # répondre à Ctrl+Alt+9). En pause, le raccourci de dictée est rendu au système.
+        self.pause_hotkey = self._keyboard_only(normalize_hotkey(
+            self.prefs.get("pause_hotkey"), plateforme.DEFAULT_PAUSE_HOTKEY))
+        self.hotkey_paused = bool(self.prefs.get("hotkey_paused", False))
+        self._pause_down = False
         self._hotkey_capture = None
 
         self._hotkey_down = False
@@ -711,6 +721,29 @@ class VoiceTranscriptionApp:
             text="Modifier le raccourci…",
             font=("Arial", 8),
             command=self._open_hotkey_dialog,
+            anchor="w"
+        ).pack(anchor=tk.W, pady=(2, 5))
+
+        tk.Label(
+            options_frame,
+            text="Pause du raccourci:",
+            font=("Arial", 9, "bold"),
+            anchor="w"
+        ).pack(anchor=tk.W, fill=tk.X, pady=(4, 2))
+
+        self.pause_pref_label = tk.Label(
+            options_frame,
+            text=self._pause_description(),
+            font=("Arial", 8),
+            anchor="w"
+        )
+        self.pause_pref_label.pack(anchor=tk.W, fill=tk.X)
+
+        tk.Button(
+            options_frame,
+            text="Modifier la pause…",
+            font=("Arial", 8),
+            command=lambda: self._open_hotkey_dialog('pause'),
             anchor="w"
         ).pack(anchor=tk.W, pady=(2, 5))
 
@@ -1221,22 +1254,51 @@ class VoiceTranscriptionApp:
 
         self.setup_global_hotkey()
         self._setup_tray()
+        # Lancée à l'ouverture de session (--barre), l'application démarre rangée dans la
+        # barre système ; sans icône, la fenêtre reste le seul moyen de la retrouver.
+        if START_IN_TRAY and self.tray_icon is None:
+            self._restore_window()
 
         if self.selected_model in LOCAL_MODELS and missing_requirement(self.selected_model) is None:
             self.local_engine.preload(self.selected_model)
 
     def _make_tray_icon_image(self):
-        """Génère programmatiquement l'icône de la tray (évite de shipper un binaire)."""
+        """Génère programmatiquement l'icône de la tray (évite de shipper un binaire).
+
+        Micro sur fond vert quand le raccourci est actif ; sur fond gris et barré quand il
+        est en pause : l'état se lit d'un coup d'œil dans la barre système."""
         img = Image.new('RGBA', (64, 64), (0, 0, 0, 0))
         d = ImageDraw.Draw(img)
-        d.ellipse((4, 4, 60, 60), fill=(220, 50, 50, 255))
+        background = (120, 120, 120, 255) if self.hotkey_paused else (46, 160, 67, 255)
+        d.ellipse((4, 4, 60, 60), fill=background)
         try:
             d.rounded_rectangle((24, 16, 40, 40), radius=8, fill=(255, 255, 255, 255))
         except AttributeError:
             d.rectangle((24, 16, 40, 40), fill=(255, 255, 255, 255))
         d.rectangle((30, 40, 34, 48), fill=(255, 255, 255, 255))
         d.rectangle((22, 48, 42, 52), fill=(255, 255, 255, 255))
+        if self.hotkey_paused:
+            d.line((14, 50, 50, 14), fill=(120, 120, 120, 255), width=10)
+            d.line((14, 50, 50, 14), fill=(255, 255, 255, 255), width=5)
         return img
+
+    def _tray_title(self):
+        if self.hotkey_paused:
+            return "Transcription Vocale — dictée en pause (%s pour la réactiver)" % (
+                describe_hotkey(self.pause_hotkey))
+        return "Transcription Vocale — dictée active (%s : pause)" % (
+            describe_hotkey(self.pause_hotkey))
+
+    def _update_tray(self):
+        """Reporte l'état de la pause sur l'icône, son infobulle et son menu."""
+        if self.tray_icon is None:
+            return
+        try:
+            self.tray_icon.icon = self._make_tray_icon_image()
+            self.tray_icon.title = self._tray_title()
+            self.tray_icon.update_menu()
+        except Exception as e:
+            print(f"⚠️ Icône système non mise à jour : {e}")
 
     def _setup_tray(self):
         """Crée l'icône de la barre système avec menu clic-droit (Afficher/Quitter).
@@ -1254,15 +1316,22 @@ class VoiceTranscriptionApp:
             def on_quit(icon, item):
                 self.root.after(0, self._quit_app)
 
+            def on_pause(icon, item):
+                self.root.after(0, self.toggle_hotkey_pause)
+
             menu = pystray.Menu(
                 pystray.MenuItem("Afficher", on_show, default=True),
+                pystray.MenuItem(
+                    lambda item: ("Réactiver la dictée" if self.hotkey_paused
+                                  else "Mettre la dictée en pause"),
+                    on_pause),
                 pystray.MenuItem("Quitter", on_quit),
             )
 
             self.tray_icon = pystray.Icon(
                 "whisper-voice",
                 icon_image,
-                "Transcription Vocale",
+                self._tray_title(),
                 menu
             )
 
@@ -1501,6 +1570,8 @@ class VoiceTranscriptionApp:
                                      if hasattr(self, 'overlay') and self.overlay.custom_position
                                      else None),
                 "hotkey": self.hotkey,
+                "pause_hotkey": self.pause_hotkey,
+                "hotkey_paused": self.hotkey_paused,
             }
             with open(PREFS_FILE, 'w', encoding='utf-8') as f:
                 json.dump(prefs, f, ensure_ascii=False, indent=2)
@@ -2065,30 +2136,84 @@ class VoiceTranscriptionApp:
             messagebox.showinfo("Info", "Aucun texte à copier")
     
     def _hotkey_banner(self):
-        """Texte du bandeau sous les boutons, reflétant le raccourci courant."""
-        return "⌨️ %s (global) — Échap pour annuler" % describe_hotkey(self.hotkey)
+        """Texte du bandeau sous les boutons, reflétant le raccourci courant et la pause."""
+        if self.hotkey_paused:
+            return "⏸️ %s en pause — %s pour le réactiver" % (
+                describe_hotkey(self.hotkey), describe_hotkey(self.pause_hotkey))
+        return "⌨️ %s (global) — Échap pour annuler — %s : pause" % (
+            describe_hotkey(self.hotkey), describe_hotkey(self.pause_hotkey))
 
-    def _apply_hotkey(self, hotkey):
-        """Enregistre un nouveau raccourci et rafraîchit les affichages."""
-        self.hotkey = hotkey
-        self._save_prefs()
+    def _pause_description(self):
+        state = "en pause" if self.hotkey_paused else "actif"
+        return "%s (raccourci %s)" % (describe_hotkey(self.pause_hotkey), state)
+
+    @staticmethod
+    def _keyboard_only(hotkey):
+        """Le raccourci de pause est une combinaison du clavier."""
+        if hotkey.get('button'):
+            return normalize_hotkey(None, plateforme.DEFAULT_PAUSE_HOTKEY)
+        return hotkey
+
+    def _refresh_hotkey_labels(self):
         if hasattr(self, 'hotkey_label'):
             self.hotkey_label.config(text=self._hotkey_banner())
         if hasattr(self, 'hotkey_pref_label'):
-            self.hotkey_pref_label.config(text=describe_hotkey(hotkey))
+            self.hotkey_pref_label.config(text=describe_hotkey(self.hotkey))
+        if hasattr(self, 'pause_pref_label'):
+            self.pause_pref_label.config(text=self._pause_description())
+
+    def _apply_hotkey(self, hotkey, target='hotkey'):
+        """Enregistre un nouveau raccourci (de dictée ou de pause) et rafraîchit l'affichage."""
+        if target == 'pause':
+            self.pause_hotkey = hotkey
+        else:
+            self.hotkey = hotkey
+        self._save_prefs()
+        self._refresh_hotkey_labels()
+        self._update_tray()
         self._grab_hotkey(notify=True)
 
     def _grab_hotkey(self, notify=False):
-        """Réserve le raccourci au système (Linux) : la touche ne s'écrit plus ailleurs."""
-        problem = plateforme.grab_hotkey(self.hotkey, self._on_hotkey_button)
+        """Réserve les raccourcis au système (Linux) : les touches ne s'écrivent plus ailleurs.
+
+        En pause, seul le raccourci de pause reste réservé : celui de dictée retrouve son
+        effet habituel (bouton de souris dans un jeu, par exemple)."""
+        hotkeys = [dict(self.pause_hotkey, exact=True)]
+        if not self.hotkey_paused:
+            hotkeys.insert(0, self.hotkey)
+        problem = plateforme.grab_hotkeys(hotkeys, self._on_hotkey_button)
         if problem:
             print(f"⚠️ {problem}")
             if notify:
                 messagebox.showwarning("Raccourci", problem)
 
+    def toggle_hotkey_pause(self):
+        """Met le raccourci de dictée en pause, ou l'en sort."""
+        if self.is_recording:
+            if hasattr(self, 'overlay'):
+                self.overlay.show_briefly("⏸️ Pause impossible pendant la dictée",
+                                          bg="#ff9800", duration_ms=1500)
+            return
+        self.hotkey_paused = not self.hotkey_paused
+        self._hotkey_down = False
+        self._save_prefs()
+        self._refresh_hotkey_labels()
+        self._update_tray()
+        self._grab_hotkey()
+        print("⏸️ Raccourci en pause" if self.hotkey_paused else "▶️ Raccourci réactivé")
+        if hasattr(self, 'overlay'):
+            if self.hotkey_paused:
+                self.overlay.show_briefly("⏸️ Dictée en pause", bg="#616161", duration_ms=1500)
+            else:
+                self.overlay.show_briefly("▶️ Dictée réactivée", bg="#2e7d32", duration_ms=1500)
+
+    def _pause_matches(self, vk, held):
+        """Le raccourci de pause, avec exactement ses modificateurs ?"""
+        return vk in self.pause_hotkey['vks'] and held == set(self.pause_hotkey['modifiers'])
+
     def _on_hotkey_button(self, button, pressed):
         """Clic du bouton de souris réservé (appelé hors du fil de Tk)."""
-        if button != self.hotkey.get('button'):
+        if self.hotkey_paused or button != self.hotkey.get('button'):
             return
         if not pressed:
             self._hotkey_down = False
@@ -2153,6 +2278,15 @@ class VoiceTranscriptionApp:
                         self.root.after(0, self.cancel_recording)
                     return
 
+                if vk is not None and self._pause_matches(vk, held):
+                    if not self._pause_down:
+                        self._pause_down = True
+                        self.root.after(0, self.toggle_hotkey_pause)
+                    return
+
+                if self.hotkey_paused:
+                    return
+
                 if vk is not None and self._hotkey_matches(vk, held):
                     if self._accept_hotkey_press():
                         self.root.after(0, self.toggle_recording)
@@ -2168,6 +2302,8 @@ class VoiceTranscriptionApp:
                         self.root.after(0, self._on_capture_modifiers, frozenset(held))
                     return
 
+                if vk is not None and vk in self.pause_hotkey['vks']:
+                    self._pause_down = False
                 if vk is not None and vk in self.hotkey['vks']:
                     self._hotkey_down = False
             except Exception:
@@ -2183,14 +2319,20 @@ class VoiceTranscriptionApp:
                                  f"Le raccourci global ne fonctionnera pas :\n{e}\n\n"
                                  f"{plateforme.HOTKEY_FAILURE_HINT}")
 
-    def _open_hotkey_dialog(self):
+    def _open_hotkey_dialog(self, target='hotkey'):
         """Capture une combinaison : les modificateurs s'accumulent, la première touche
-        normale la fige — l'ordre de pression est donc sans importance."""
+        normale la fige — l'ordre de pression est donc sans importance.
+
+        `target` : 'hotkey' pour le raccourci de dictée, 'pause' pour celui qui le met en
+        pause (clavier seulement)."""
         if self._hotkey_capture is not None:
             return
+        with_mouse = plateforme.SUPPORTS_MOUSE and target == 'hotkey'
+        default = DEFAULT_HOTKEY if target == 'hotkey' else plateforme.DEFAULT_PAUSE_HOTKEY
 
         dialog = tk.Toplevel(self.root)
-        dialog.title("Modifier le raccourci")
+        dialog.title("Modifier le raccourci" if target == 'hotkey'
+                     else "Modifier le raccourci de pause")
         dialog.geometry("440x280")
         dialog.transient(self.root)
         dialog.grab_set()
@@ -2207,7 +2349,7 @@ class VoiceTranscriptionApp:
             dialog,
             text="Maintenez Ctrl, Alt, Maj ou %s, puis appuyez sur la touche finale%s."
                  % (MODIFIER_LABELS['win'],
-                    " ou sur un bouton latéral de la souris" if plateforme.SUPPORTS_MOUSE else ""),
+                    " ou sur un bouton latéral de la souris" if with_mouse else ""),
             font=("Arial", 8),
             fg="gray",
             wraplength=400
@@ -2234,7 +2376,7 @@ class VoiceTranscriptionApp:
 
         tk.Button(
             dialog,
-            text="Rétablir %s" % describe_hotkey(DEFAULT_HOTKEY),
+            text="Rétablir %s" % describe_hotkey(default),
             font=("Arial", 8),
             relief=tk.FLAT,
             fg="#1565c0",
@@ -2242,7 +2384,7 @@ class VoiceTranscriptionApp:
         ).pack()
 
         mouse = None
-        if plateforme.SUPPORTS_MOUSE:
+        if with_mouse:
             def on_click(button, pressed):
                 if pressed and button >= plateforme.MOUSE_BUTTON_MIN:
                     self.root.after(0, self._on_capture_button, button)
@@ -2259,6 +2401,7 @@ class VoiceTranscriptionApp:
             'pending': None,
             'held': frozenset(),
             'mouse': mouse,
+            'target': target,
         }
 
     def _on_capture_modifiers(self, held):
@@ -2302,6 +2445,16 @@ class VoiceTranscriptionApp:
         capture = self._hotkey_capture
         capture['pending'] = hotkey
         capture['preview'].config(text=describe_hotkey(hotkey))
+        other = self.pause_hotkey if capture['target'] == 'hotkey' else self.hotkey
+        clash = (not hotkey.get('button') and not other.get('button')
+                 and set(hotkey['modifiers']) == set(other['modifiers'])
+                 and set(hotkey['vks']) & set(other['vks']))
+        if clash:
+            capture['warning'].config(
+                text="Cette combinaison est déjà celle %s." % (
+                    "de la pause" if capture['target'] == 'hotkey' else "de la dictée"))
+            capture['validate'].config(state=tk.DISABLED)
+            return
         capture['warning'].config(text=warning)
         capture['validate'].config(state=tk.NORMAL)
 
@@ -2310,14 +2463,18 @@ class VoiceTranscriptionApp:
         capture = self._hotkey_capture
         if capture is None or capture['pending'] is None:
             return
-        hotkey = capture['pending']
+        hotkey, target = capture['pending'], capture['target']
         self._close_hotkey_dialog()
-        self._apply_hotkey(hotkey)
+        self._apply_hotkey(hotkey, target)
 
     def _reset_hotkey(self):
         """Rétablit le raccourci d'origine."""
+        target = self._hotkey_capture['target'] if self._hotkey_capture else 'hotkey'
         self._close_hotkey_dialog()
-        self._apply_hotkey(normalize_hotkey(DEFAULT_HOTKEY))
+        if target == 'pause':
+            self._apply_hotkey(normalize_hotkey(None, plateforme.DEFAULT_PAUSE_HOTKEY), 'pause')
+        else:
+            self._apply_hotkey(normalize_hotkey(DEFAULT_HOTKEY))
 
     def _close_hotkey_dialog(self):
         """Ferme la fenêtre de capture et réactive le raccourci global."""
@@ -2370,6 +2527,8 @@ def main():
         return
 
     root = tk.Tk()
+    if START_IN_TRAY:
+        root.withdraw()
     app = VoiceTranscriptionApp(root)
     serve_single_instance_lock(lock, app)
 
