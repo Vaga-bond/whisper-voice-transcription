@@ -1,24 +1,41 @@
 #!/usr/bin/env bash
-# Installation sous Linux (Debian, Ubuntu, Linux Mint et dérivés), session X11.
+# Installation sous Linux (Debian, Ubuntu, Linux Mint, Kubuntu et dérivés), session X11 ou
+# Wayland.
 set -euo pipefail
 cd "$(dirname "$(readlink -f "$0")")"
 APP_DIR="$(pwd)"
 
-if [ "${XDG_SESSION_TYPE:-}" = "wayland" ]; then
-    echo "⚠️  Session Wayland détectée : le raccourci global et le collage automatique"
-    echo "   n'y fonctionnent pas. Choisissez une session X11 à l'écran de connexion."
-    echo
-fi
-
 echo "Paquets du système (mot de passe administrateur demandé)..."
-# python3-tk : interface ; libportaudio2 : micro ; xclip : presse-papier ;
-# python3-dev et build-essential : compilation d'evdev, requis par pynput ;
+# python3-tk : interface ; libportaudio2 : micro ; xclip et wl-clipboard : presse-papier
+# (X11 et Wayland) ; python3-dev et build-essential : compilation d'evdev, requis par pynput ;
 # python3-gi et AyatanaAppIndicator : icône de la barre système ;
 # libvulkan1 et mesa-vulkan-drivers : carte graphique pour les modèles locaux.
 sudo apt-get update
 sudo apt-get install -y python3-venv python3-tk python3-dev build-essential \
-    libportaudio2 xclip python3-gi gir1.2-ayatanaappindicator3-0.1 \
+    libportaudio2 xclip wl-clipboard python3-gi gir1.2-ayatanaappindicator3-0.1 \
     libvulkan1 mesa-vulkan-drivers
+
+# Sous Wayland, aucune application ne peut lire le clavier des autres ni leur envoyer de
+# touches : l'application lit les périphériques du noyau (groupe « input ») et colle par un
+# clavier virtuel (/dev/uinput, ouvert à l'utilisateur de la session).
+NEW_SESSION_NEEDED=0
+if [ "${XDG_SESSION_TYPE:-}" = "wayland" ]; then
+    echo
+    echo "Session Wayland : accès au clavier et clavier virtuel..."
+    if ! id -nG "$USER" | tr ' ' '\n' | grep -qx input; then
+        sudo usermod -aG input "$USER"
+    fi
+    # Le groupe ne vaut que pour les sessions ouvertes après l'ajout.
+    if ! id -nG | tr ' ' '\n' | grep -qx input; then
+        NEW_SESSION_NEEDED=1
+    fi
+    echo 'KERNEL=="uinput", SUBSYSTEM=="misc", OPTIONS+="static_node=uinput", TAG+="uaccess"' \
+        | sudo tee /etc/udev/rules.d/70-transcription-vocale-uinput.rules >/dev/null
+    echo uinput | sudo tee /etc/modules-load.d/transcription-vocale-uinput.conf >/dev/null
+    sudo modprobe uinput
+    sudo udevadm control --reload-rules
+    sudo udevadm trigger --subsystem-match=misc --sysname-match=uinput
+fi
 
 echo
 echo "Environnement virtuel..."
@@ -51,6 +68,11 @@ EOF
 echo
 echo "Installation terminée."
 echo
+if [ "$NEW_SESSION_NEEDED" = 1 ]; then
+    echo "⚠️  Fermez la session et rouvrez-la avant le premier lancement : l'accès au"
+    echo "   clavier (groupe « input ») ne compte qu'à partir de la prochaine session."
+    echo
+fi
 echo "Lancement : « Transcription Vocale » dans le menu, ou ./start.sh"
 echo "Avec les messages de diagnostic : ./start_console.sh"
 echo

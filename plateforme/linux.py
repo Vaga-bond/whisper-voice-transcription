@@ -1,8 +1,8 @@
 """Fonctions propres à Linux (session X11) : clavier, presse-papier, fenêtre active, overlay.
 
-Tout passe par le serveur X : raccourci global, collage simulé et forme de l'overlay. Une
-session Wayland ne permet ni l'écoute du clavier de tout le système ni l'envoi de touches
-aux autres applications ; l'application le signale au démarrage.
+Tout passe par le serveur X : raccourci global, collage simulé et forme de l'overlay. En
+session Wayland, wayland.py prend le relais et reprend d'ici ce qui reste valable sous
+XWayland (noms des touches, overlay, micros).
 """
 import math
 import os
@@ -291,11 +291,14 @@ def grab_hotkey(hotkey, on_button=None):
         return f"Réservation du raccourci impossible : {e}"
 
 
-_controller = pynput_keyboard.Controller()
+_controller = None
 
 
 def send_paste(terminal):
     """Envoie Ctrl+V, ou Ctrl+Maj+V pour un terminal."""
+    global _controller
+    if _controller is None:
+        _controller = pynput_keyboard.Controller()
     keys = [pynput_keyboard.Key.ctrl]
     if terminal:
         keys.append(pynput_keyboard.Key.shift)

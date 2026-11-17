@@ -13,10 +13,13 @@ Prérequis : **Python 3.10 ou plus récent**, installé avec l'option « Add Pyt
 
 ### Linux
 
-Pour Debian, Ubuntu, Linux Mint et leurs dérivés, dans une **session X11** : sous Wayland, le système interdit le raccourci global et le collage automatique (sous Linux Mint, choisir « Cinnamon » et non « Cinnamon sur Wayland » à l'écran de connexion ; `echo $XDG_SESSION_TYPE` doit répondre `x11`).
+Pour Debian, Ubuntu, Linux Mint, Kubuntu et leurs dérivés, en session **X11** ou **Wayland** : l'application choisit d'elle-même.
 
 1. `./setup.sh` : installe les paquets du système (mot de passe administrateur demandé), crée l'environnement virtuel et ajoute **Transcription Vocale** au menu des applications
-2. Lancer depuis le menu, ou `./start.sh` (`./start_console.sh` pour voir les messages de diagnostic)
+2. Sous Wayland, la première fois seulement : fermer la session et la rouvrir
+3. Lancer depuis le menu, ou `./start.sh` (`./start_console.sh` pour voir les messages de diagnostic)
+
+Sous Wayland, le système interdit à une application de lire le clavier des autres et de leur envoyer des touches. L'application passe donc par le noyau : `setup.sh` ajoute l'utilisateur au groupe `input` (lecture du clavier et de la souris) et ouvre `/dev/uinput` à la session (clavier virtuel qui envoie Ctrl+V). Le presse-papier passe par `wl-clipboard`. La détection des terminaux, qui collent avec Ctrl+Maj+V, demande KDE Plasma ; ailleurs, l'option manuelle « terminal » reste disponible.
 
 Le modèle par défaut, **Whisper large-v3 turbo local**, ne demande ni compte ni clé : à la première dictée, l'application propose de télécharger son fichier (≈ 890 Mo). Les autres modèles locaux se téléchargent de la même façon quand on les choisit. La carte graphique est utilisée par son pilote habituel (Vulkan, présent avec les pilotes NVIDIA, AMD et Intel récents) ; sans carte graphique compatible, le processeur prend le relais, plus lentement.
 
