@@ -1,207 +1,418 @@
-"""Fonctions propres à Linux en session Wayland : mêmes fonctions que linux.py, autres moyens.
+"""Fonctions propres à Linux en session Wayland (KDE Plasma) : mêmes besoins que linux.py,
+par les moyens que Wayland autorise.
 
-Wayland interdit aux applications de lire le clavier des autres et de leur envoyer des
-touches. Chaque besoin passe donc par un moyen autorisé :
+Wayland n'envoie le clavier et la souris qu'à la fenêtre au premier plan. Une application
+en arrière-plan comme celle-ci demande donc au bureau :
 
-- raccourci, Échap et boutons de la souris : processus entrees_wayland.py, qui lit les
-  périphériques du noyau (groupe « input ») et réserve le raccourci ;
-- collage : un clavier virtuel (uinput) envoie Ctrl+V ;
+- raccourci de dictée : portail de raccourcis globaux (org.freedesktop.portal.GlobalShortcuts).
+  KDE intercepte la combinaison, l'empêche d'atteindre l'application active et signale
+  l'appui puis le relâchement. Le portail ne connaît que le clavier : pour un bouton de la
+  souris, KWin transforme le bouton en une touche qu'aucun clavier ne porte (« Lancer 5 »),
+  et cette touche est le raccourci du portail. La transformation n'existe que tant que la
+  dictée est active : en pause, le bouton retrouve son effet habituel. Aucun périphérique
+  n'est lu par l'application ;
+- annulation : pendant un enregistrement seulement, le bouton arrière devient de même une
+  seconde touche fantôme (« Lancer 6 »), raccourci « annuler » du portail ;
+- collage : un clavier virtuel (uinput) envoie Ctrl+V, en écriture seule ;
 - presse-papier : wl-clipboard ;
-- fenêtre active : un script KWin la signale à chaque changement (KDE Plasma).
+- fenêtre active : un script KWin la signale à chaque changement.
 
 L'interface Tk tourne sous XWayland : noms des touches et forme de l'overlay viennent de
-linux.py, inchangés. Les codes de touches restent ceux de X11 (code evdev + 8), si bien qu'un
-raccourci enregistré dans une session X11 garde son sens ici.
+linux.py, inchangés.
 """
 import atexit
-import glob
-import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+import uuid
 
 import evdev
 import pyperclip
 from evdev import ecodes
-from pynput import keyboard as pynput_keyboard
 
 from .linux import (  # noqa: F401  (réexportés pour app.py)
-    BARE_BUTTON_WARNING, BARE_KEY_WARNING, DEFAULT_HOTKEY, DEFAULT_PAUSE_HOTKEY,
-    MODIFIER_LABELS, MOUSE_BUTTON_MAX,
-    MOUSE_BUTTON_MIN, SAFE_BARE_CODES, _TERMINAL_CLASSES, _display_lock, _x, button_label,
-    key_label, mic_hidden, overlay_circle, overlay_click_through, overlay_round_corners,
+    DEFAULT_PAUSE_HOTKEY, MODIFIER_LABELS, MOUSE_BUTTON_MAX, MOUSE_BUTTON_MIN,
+    SAFE_BARE_CODES, _TERMINAL_CLASSES, _display_lock, _x, button_label, key_label,
+    mic_hidden, overlay_circle, overlay_click_through, overlay_round_corners,
 )
 
 NAME = "Linux (Wayland)"
 SETUP_SCRIPT = "setup.sh"
 
-GRABS_HOTKEY = True
+# Le raccourci passe par le bureau : l'application ne lit ni ne réserve aucune touche.
+HOTKEY_VIA_DESKTOP = True
+GRABS_HOTKEY = False
 SUPPORTS_MOUSE = True
 
-HOTKEY_FAILURE_HINT = ("Relancez setup.sh, puis fermez la session et rouvrez-la pour que "
-                       "l'accès au clavier soit pris en compte.")
+DEFAULT_HOTKEY = {'modifiers': [], 'vks': [], 'button': 9}   # bouton avant de la souris
+BARE_KEY_WARNING = ""
+BARE_BUTTON_WARNING = ("Tant que la dictée est active, ce bouton ne sert qu'à elle. En pause, "
+                       "il retrouve son effet habituel (page suivante, jeux…). Pendant un "
+                       "enregistrement, le bouton arrière l'annule.")
 
-_X_OFFSET = 8
-# Modificateurs et Échap, par keycode X, sous la forme que pynput leur donne sous X11.
-_SPECIAL_KEYS = {
-    37: pynput_keyboard.Key.ctrl_l, 105: pynput_keyboard.Key.ctrl_r,
-    64: pynput_keyboard.Key.alt_l, 108: pynput_keyboard.Key.alt_gr,
-    50: pynput_keyboard.Key.shift_l, 62: pynput_keyboard.Key.shift_r,
-    133: pynput_keyboard.Key.cmd_l, 134: pynput_keyboard.Key.cmd_r,
-    9: pynput_keyboard.Key.esc,
-}
-_MODIFIER_CODES = {
-    'ctrl': {37, 105}, 'alt': {64, 108}, 'shift': {50, 62}, 'win': {133, 134},
-}
-_ALL_MODIFIER_CODES = set().union(*_MODIFIER_CODES.values())
+HOTKEY_FAILURE_HINT = ("Le raccourci passe par le portail de raccourcis de KDE "
+                       "(xdg-desktop-portal-kde) : vérifiez qu'il est installé, puis relancez "
+                       "l'application.")
 
-_HELPER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'entrees_wayland.py')
-_HELPER_START_TIMEOUT = 5.0
+APP_ID = 'transcription-vocale'     # nom du fichier .desktop installé par setup.sh
 
 
-# ── Clavier et souris ────────────────────────────────────────────────────────
+# ── Raccourci par le portail ─────────────────────────────────────────────────
 
-class _Entrees:
-    """Le processus d'écoute, et ce que l'application y a branché."""
+_PORTAL = 'org.freedesktop.portal.Desktop'
+_PORTAL_PATH = '/org/freedesktop/portal/desktop'
+_SHORTCUTS = 'org.freedesktop.portal.GlobalShortcuts'
+_REQUEST = 'org.freedesktop.portal.Request'
 
-    def __init__(self):
-        self.process = subprocess.Popen(
-            [sys.executable, '-u', _HELPER], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            text=True, bufsize=1)
-        self.held = set()                 # keycodes X enfoncés
-        self.key_handlers = []            # (on_press, on_release)
-        self.mouse_handlers = []          # on_click(bouton, enfoncé)
-        self.button_hotkey = None         # raccourci réservé sur un bouton de souris
-        self.on_button = None
-        self.button_down = False
-        self.denied = False
-        self._ready = threading.Event()
-        threading.Thread(target=self._read, daemon=True).start()
-        if not self._ready.wait(_HELPER_START_TIMEOUT):
-            raise RuntimeError("le processus d'écoute du clavier ne répond pas")
-        if self.denied:
-            raise RuntimeError("accès au clavier refusé (groupe « input »)")
+SHORTCUT_MOUSE = 'dictee-souris'
+SHORTCUT_KEYBOARD = 'dictee-clavier'
+SHORTCUT_CANCEL = 'dictee-annuler'
+_DICTATION_SHORTCUTS = {SHORTCUT_MOUSE, SHORTCUT_KEYBOARD}
+# Touche fantôme du bouton de souris. Elle doit exister dans la disposition du clavier (F24
+# n'y est pas : KWin ignorerait la transformation) et n'être prise par rien d'autre
+# (« Outils » ouvre la Configuration du système).
+PHANTOM_TRIGGER = 'XF86Launch5'
+PHANTOM_KEY = 'Launch (5)'           # même touche, sous le nom qu'en donne Qt à KWin
+CANCEL_TRIGGER = 'XF86Launch6'       # touche fantôme du bouton d'annulation
+CANCEL_KEY = 'Launch (6)'
+CANCEL_BUTTON = 8                    # bouton arrière
 
-    def _read(self):
-        for line in self.process.stdout:
-            kind, *values = line.split()
-            try:
-                if kind == 'k':
-                    self._on_key(int(values[0]), int(values[1]))
-                elif kind == 'b':
-                    self._on_button(int(values[0]), values[1] == '1')
-                elif kind == 'ok':
-                    self._ready.set()
-                elif kind == 'e':
-                    if values[:1] == ['permission']:
-                        self.denied = True
-                    else:
-                        print("⚠️ Écoute du clavier :", ' '.join(values))
-            except Exception as e:
-                print(f"⚠️ Écoute du clavier : {e}")
-        self._ready.set()
+_REQUEST_TIMEOUT = 120               # la première fois, KDE attend que l'on accepte
 
-    def _on_key(self, code, value):
-        if value == 0:
-            self.held.discard(code)
-        else:
-            self.held.add(code)
-        key = _SPECIAL_KEYS.get(code) or pynput_keyboard.KeyCode.from_vk(code)
-        for on_press, on_release in list(self.key_handlers):
-            (on_release if value == 0 else on_press)(key, code)
 
-    def _modifiers_match(self, required):
-        held = {name for name, codes in _MODIFIER_CODES.items() if self.held & codes}
-        return set(required) <= held if required else not held
+class _Portail:
+    """Une session du portail, servie par un fil qui fait tourner sa boucle GLib."""
 
-    def _on_button(self, button, pressed):
-        for on_click in list(self.mouse_handlers):
-            on_click(button, pressed)
-        hotkey = self.button_hotkey
-        if self.on_button is None or not hotkey or hotkey['button'] != button:
+    def __init__(self, shortcuts, on_change, on_ready):
+        """Ne bloque pas : la première fois, KDE attend que l'on accepte les raccourcis.
+        on_ready(None ou exception) est appelé, hors du fil de Tk, une fois la session prête."""
+        import gi
+        gi.require_version('Gio', '2.0')
+        from gi.repository import Gio, GLib
+        self.Gio, self.GLib = Gio, GLib
+        self.shortcuts = shortcuts
+        self.on_change = on_change
+        self.on_ready = on_ready
+        self.held = set()                 # raccourcis enfoncés en ce moment
+        self.session = None
+        self.context = None
+        self.conn = None
+        self.ready = False
+        threading.Thread(target=self._serve, daemon=True).start()
+
+    # Fil du portail
+
+    def _serve(self):
+        Gio, GLib = self.Gio, self.GLib
+        self.context = GLib.MainContext.new()
+        self.context.push_thread_default()
+        try:
+            # Connexion à part : l'identité de l'application se déclare une seule fois par
+            # connexion, avant tout autre appel au portail.
+            address = Gio.dbus_address_get_for_bus_sync(Gio.BusType.SESSION, None)
+            self.conn = Gio.DBusConnection.new_for_address_sync(
+                address, Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT
+                | Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION, None, None)
+            self._register()
+            self.session = self._request('CreateSession', lambda token: GLib.Variant(
+                '(a{sv})', ({'handle_token': GLib.Variant('s', token),
+                             'session_handle_token': GLib.Variant('s', 's' + token)},)
+            ))['session_handle']
+            for signal in ('Activated', 'Deactivated'):
+                self.conn.signal_subscribe(_PORTAL, _SHORTCUTS, signal, _PORTAL_PATH, None,
+                                           Gio.DBusSignalFlags.NONE, self._on_signal)
+            self._bind()
+        except Exception as e:
+            self.on_ready(e)
             return
-        # Comme le bouton réservé sous X11 : l'appui compte avec les bons modificateurs,
-        # et son relâchement suit toujours.
-        if pressed and self._modifiers_match(hotkey['modifiers']):
-            self.button_down = True
-            self.on_button(button, True)
-        elif not pressed and self.button_down:
-            self.button_down = False
-            self.on_button(button, False)
+        self.ready = True
+        self.on_ready(None)
+        GLib.MainLoop(self.context).run()
 
-    def reserve(self, hotkeys, on_button):
-        self.on_button = on_button
-        self.button_hotkey = next((h for h in hotkeys if h.get('button')), None)
-        wanted = []
-        for hotkey in hotkeys:
-            base = {'modifiers': hotkey['modifiers'], 'exact': bool(hotkey.get('exact'))}
-            if hotkey.get('button'):
-                wanted.append(dict(base, button=hotkey['button']))
-            else:
-                wanted += [dict(base, key=code) for code in hotkey['vks']]
-        self.process.stdin.write(json.dumps(wanted) + '\n')
-        self.process.stdin.flush()
+    def _register(self):
+        try:
+            self.conn.call_sync(_PORTAL, _PORTAL_PATH, 'org.freedesktop.host.portal.Registry',
+                                'Register', self.GLib.Variant('(sa{sv})', (APP_ID, {})),
+                                None, self.Gio.DBusCallFlags.NONE, -1, None)
+        except self.GLib.Error as e:
+            # Sans fichier .desktop, KDE range les raccourcis sous un nom générique.
+            print(f"⚠️ Portail : application non identifiée ({e.message})")
 
-    def alive(self):
-        return self.process.poll() is None
+    def _request(self, method, build_params):
+        """Appelle une méthode qui répond par un objet Request et attend sa réponse."""
+        Gio, GLib = self.Gio, self.GLib
+        token = 'tv' + uuid.uuid4().hex
+        sender = self.conn.get_unique_name()[1:].replace('.', '_')
+        path = '/org/freedesktop/portal/desktop/request/%s/%s' % (sender, token)
+        loop = GLib.MainLoop(self.context)
+        result = {}
+
+        def on_response(_conn, _sender, _path, _iface, _signal, params):
+            result['code'], result['data'] = params.unpack()
+            loop.quit()
+
+        def on_timeout():
+            loop.quit()
+            return False
+
+        subscription = self.conn.signal_subscribe(_PORTAL, _REQUEST, 'Response', path, None,
+                                                  Gio.DBusSignalFlags.NONE, on_response)
+        try:
+            self.conn.call_sync(_PORTAL, _PORTAL_PATH, _SHORTCUTS, method, build_params(token),
+                                GLib.VariantType('(o)'), Gio.DBusCallFlags.NONE, -1, None)
+            timeout = GLib.timeout_source_new_seconds(_REQUEST_TIMEOUT)
+            timeout.set_callback(on_timeout)
+            timeout.attach(self.context)
+            loop.run()
+            timeout.destroy()
+        finally:
+            self.conn.signal_unsubscribe(subscription)
+        if 'code' not in result:
+            raise RuntimeError("%s : pas de réponse du portail" % method)
+        if result['code'] != 0:
+            raise RuntimeError("%s refusé par le portail (code %d)" % (method, result['code']))
+        return result['data']
+
+    def _bind(self):
+        GLib = self.GLib
+        shortcuts = []
+        for ident, description, trigger in self.shortcuts:
+            options = {'description': GLib.Variant('s', description)}
+            if trigger:
+                options['preferred_trigger'] = GLib.Variant('s', trigger)
+            shortcuts.append((ident, options))
+        self._request('BindShortcuts', lambda token: GLib.Variant(
+            '(oa(sa{sv})sa{sv})',
+            (self.session, shortcuts, '', {'handle_token': GLib.Variant('s', token)})))
+
+    def _on_signal(self, _conn, _sender, _path, _iface, signal, params):
+        session, ident, _timestamp, _options = params.unpack()
+        if session != self.session:
+            return
+        if signal == 'Activated':
+            self.held.add(ident)
+            self.on_change(ident, True)
+        else:
+            self.held.discard(ident)
+            self.on_change(ident, False)
+
+    # Appels depuis les autres fils
+
+    def _in_thread(self, fn):
+        """Exécute fn dans le fil du portail et en rend le résultat (ou l'exception)."""
+        done = threading.Event()
+        outcome = {}
+
+        def run():
+            try:
+                outcome['value'] = fn()
+            except Exception as e:
+                outcome['error'] = e
+            done.set()
+            return False
+
+        self.context.invoke_full(self.GLib.PRIORITY_DEFAULT, run)
+        if not done.wait(_REQUEST_TIMEOUT + 10):
+            raise RuntimeError("le portail de raccourcis ne répond pas")
+        if 'error' in outcome:
+            raise outcome['error']
+        return outcome.get('value')
+
+    def triggers(self):
+        """{identifiant: description du déclencheur choisi dans KDE}."""
+        def call():
+            data = self._request('ListShortcuts', lambda token: self.GLib.Variant(
+                '(oa{sv})', (self.session, {'handle_token': self.GLib.Variant('s', token)})))
+            return {ident: options.get('trigger_description', '')
+                    for ident, options in data.get('shortcuts', [])}
+        return self._in_thread(call)
+
+    def configure(self):
+        """Ouvre la fenêtre de KDE où l'on choisit les touches des raccourcis."""
+        def call():
+            self.conn.call_sync(_PORTAL, _PORTAL_PATH, _SHORTCUTS, 'ConfigureShortcuts',
+                                self.GLib.Variant('(osa{sv})', (self.session, '', {})),
+                                None, self.Gio.DBusCallFlags.NONE, -1, None)
+        self._in_thread(call)
 
 
-_entrees = None
-_entrees_lock = threading.Lock()
+_portail = None
 
 
-def _get_entrees():
-    global _entrees
-    with _entrees_lock:
-        if _entrees is None or not _entrees.alive():
-            _entrees = _Entrees()
-        return _entrees
+def start_desktop_hotkey(on_change, on_ready):
+    """Demande au bureau les raccourcis de dictée, sans bloquer.
+
+    on_change(action, enfoncé) à chaque appui et relâchement, action valant 'dictee' ou
+    'annuler' ; on_ready(None ou raison de l'échec)
+    une fois la session prête, après acceptation dans la fenêtre de KDE la première fois.
+    Les deux sont appelés hors du fil de Tk."""
+    global _portail
+    if _portail is not None:
+        return
+    try:
+        _clear_phantom_rebinds()      # restes d'une session précédente interrompue
+    except (OSError, subprocess.SubprocessError) as e:
+        print(f"⚠️ Réglages des boutons de KDE illisibles : {e}")
+    shortcuts = [
+        (SHORTCUT_MOUSE, "Dictée par un bouton de la souris (touche fantôme, ne pas modifier)",
+         PHANTOM_TRIGGER),
+        (SHORTCUT_KEYBOARD, "Dictée par une combinaison du clavier", None),
+        (SHORTCUT_CANCEL, "Annulation par le bouton arrière (touche fantôme, ne pas modifier)",
+         CANCEL_TRIGGER),
+    ]
+
+    def changed(ident, pressed):
+        on_change('annuler' if ident == SHORTCUT_CANCEL else 'dictee', pressed)
+
+    def ready(error):
+        on_ready(None if error is None else f"Raccourci de dictée indisponible : {error}")
+
+    try:
+        _portail = _Portail(shortcuts, changed, ready)
+    except Exception as e:
+        on_ready(f"Raccourci de dictée indisponible : {e}")
 
 
-class _Handle:
-    """Ce que start_key_listener et start_mouse_listener renvoient : de quoi arrêter."""
-
-    def __init__(self, items, item):
-        self._items, self._item = items, item
-        items.append(item)
-
-    def stop(self):
-        if self._item in self._items:
-            self._items.remove(self._item)
-
-
-def start_key_listener(on_press, on_release):
-    """Écoute le clavier de tout le système ; on_press(touche, code) et on_release(touche, code)."""
-    entrees = _get_entrees()
-    _paste_keyboard()       # créé d'avance : le bureau met un instant à adopter un clavier
-    _watch_active_window()
-    return _Handle(entrees.key_handlers, (on_press, on_release))
+def configure_desktop_keyboard():
+    """Ouvre la fenêtre de KDE où l'on choisit la combinaison du clavier. Renvoie None, ou la
+    raison d'un échec."""
+    if _portail is None or not _portail.ready:
+        return "Le portail de raccourcis n'est pas prêt."
+    try:
+        _portail.configure()
+    except Exception as e:
+        return f"Fenêtre des raccourcis de KDE impossible à ouvrir : {e}"
+    return None
 
 
-def start_mouse_listener(on_click):
-    """Écoute les boutons latéraux de toutes les souris ; on_click(bouton, enfoncé)."""
-    return _Handle(_get_entrees().mouse_handlers, on_click)
+def desktop_keyboard_trigger():
+    """Combinaison du clavier choisie dans KDE pour la dictée, ou chaîne vide."""
+    if _portail is None or not _portail.ready:
+        return ''
+    try:
+        return _portail.triggers().get(SHORTCUT_KEYBOARD, '')
+    except Exception as e:
+        print(f"⚠️ Raccourcis du portail illisibles : {e}")
+        return ''
 
 
 def keys_held(codes):
-    """Un modificateur ou l'une des touches `codes` est-il enfoncé en ce moment ?"""
-    held = _get_entrees().held
-    return bool(held & (_ALL_MODIFIER_CODES | set(codes)))
+    """Le raccourci de dictée est-il encore tenu (bouton ou combinaison) ?"""
+    return bool(_portail is not None and _portail.held & _DICTATION_SHORTCUTS)
 
 
-def grab_hotkeys(hotkeys, on_button=None):
-    """Réserve les raccourcis à l'application ; on_button(bouton, enfoncé) reçoit les clics du
-    bouton réservé. Un raccourci marqué 'exact' n'accepte pas de modificateur en plus.
-    Renvoie None, ou la raison pour laquelle la réservation a échoué."""
+# ── Bouton de souris transformé par KWin ─────────────────────────────────────
+# Réglage natif de KDE (Configuration du système > Souris > boutons supplémentaires) : le
+# groupe [ButtonRebinds][Mouse] de kcminputrc associe ExtraButtonN à une touche. KWin le
+# relit dès qu'on l'écrit avec --notify. ExtraButton1 est le bouton X 8 (arrière),
+# ExtraButton2 le bouton 9 (avant), etc.
+
+_PHANTOM_VALUE = 'Key,' + PHANTOM_KEY
+_CANCEL_VALUE = 'Key,' + CANCEL_KEY
+_OUR_VALUES = {_PHANTOM_VALUE, _CANCEL_VALUE}
+_REBIND_GROUP = ['--file', 'kcminputrc', '--group', 'ButtonRebinds', '--group', 'Mouse']
+_REBIND_HEADER = '[ButtonRebinds][Mouse]'
+
+
+def _rebind_name(button):
+    return 'ExtraButton%d' % (button - MOUSE_BUTTON_MIN + 1)
+
+
+def _read_rebinds():
+    """{ExtraButtonN: valeur} du groupe, lu d'un coup dans kcminputrc (un appel à kreadconfig6
+    par bouton retarderait chaque début d'enregistrement)."""
+    base = os.environ.get('XDG_CONFIG_HOME') or os.path.expanduser('~/.config')
     try:
-        _get_entrees().reserve(hotkeys, on_button)
-    except Exception as e:
-        return f"Réservation du raccourci impossible : {e}"
-    return None
+        with open(os.path.join(base, 'kcminputrc'), encoding='utf-8') as f:
+            lines = f.read().splitlines()
+    except FileNotFoundError:
+        return {}
+    rebinds, inside = {}, False
+    for line in lines:
+        line = line.strip()
+        if line.startswith('['):
+            inside = line == _REBIND_HEADER
+        elif inside and '=' in line:
+            key, value = line.split('=', 1)
+            rebinds[key.strip()] = value.strip()
+    return rebinds
+
+
+def _read_rebind(name):
+    return _read_rebinds().get(name, '')
+
+
+def _write_rebind(name, value):
+    args = ['kwriteconfig6', *_REBIND_GROUP, '--key', name, '--notify']
+    args += ['--delete'] if value is None else [value]
+    subprocess.run(args, check=True, capture_output=True, timeout=5)
+
+
+def _clear_phantom_rebinds(keep=()):
+    """Retire nos transformations de bouton, sauf celles de `keep` ; ne touche à aucune autre."""
+    for name, value in _read_rebinds().items():
+        if name not in keep and value in _OUR_VALUES:
+            _write_rebind(name, None)
+
+
+def desktop_cancel_button(hotkey):
+    """Bouton qui annule un enregistrement, ou None quand il sert déjà à la dictée."""
+    return None if hotkey.get('button') == CANCEL_BUTTON else CANCEL_BUTTON
+
+
+def apply_desktop_hotkey(hotkey, active, recording=False):
+    """Pose ou retire les transformations de boutons selon l'état de la dictée : bouton de
+    dictée tant qu'elle est active, bouton d'annulation pendant un enregistrement.
+
+    Renvoie None, ou la raison pour laquelle le bouton de dictée ne peut pas servir."""
+    wanted = {}
+    if active and hotkey.get('button'):
+        wanted[_rebind_name(hotkey['button'])] = _PHANTOM_VALUE
+    cancel = desktop_cancel_button(hotkey)
+    if active and recording and cancel:
+        wanted[_rebind_name(cancel)] = _CANCEL_VALUE
+    problem = None
+    try:
+        current = _read_rebinds()
+        for name, value in list(wanted.items()):
+            taken = current.get(name)
+            if taken and taken not in _OUR_VALUES:
+                del wanted[name]
+                if value == _PHANTOM_VALUE:
+                    problem = ("Ce bouton a déjà une autre fonction dans les réglages de la souris "
+                               "de KDE (%s) : retirez-la, ou choisissez un autre bouton." % taken)
+                else:
+                    print("⚠️ Bouton arrière déjà réglé dans KDE (%s) : pas d'annulation par la "
+                          "souris." % taken)
+        for name, value in current.items():
+            if value in _OUR_VALUES and wanted.get(name) != value:
+                _write_rebind(name, None)
+        for name, value in wanted.items():
+            if current.get(name) != value:
+                _write_rebind(name, value)
+    except (OSError, subprocess.SubprocessError) as e:
+        return f"Réglage du bouton dans KDE impossible : {e}"
+    return problem
+
+
+def _restore_buttons():
+    try:
+        _clear_phantom_rebinds()
+    except Exception:
+        pass
+
+
+atexit.register(_restore_buttons)
+# À la fermeture de session, le système arrête l'application par SIGTERM : sans ce relais,
+# atexit ne passerait pas et le bouton resterait transformé jusqu'au prochain lancement.
+if (threading.current_thread() is threading.main_thread()
+        and signal.getsignal(signal.SIGTERM) is signal.SIG_DFL):
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 
 
 # ── Collage ──────────────────────────────────────────────────────────────────
@@ -220,6 +431,16 @@ def _paste_keyboard():
     return _keyboard
 
 
+def prepare_paste():
+    """Crée d'avance le clavier de collage et le suivi de la fenêtre active : le bureau met un
+    instant à adopter un nouveau clavier."""
+    try:
+        _paste_keyboard()
+    except OSError as e:
+        print(f"⚠️ Clavier de collage indisponible : {e}")
+    _watch_active_window()
+
+
 def _v_code():
     """Code de la touche qui donne « v » dans la disposition du clavier (AZERTY, Dvorak…)."""
     try:
@@ -227,7 +448,7 @@ def _v_code():
             import Xlib.XK
             code = _x().keysym_to_keycode(Xlib.XK.string_to_keysym('v'))
         if code:
-            return code - _X_OFFSET
+            return code - 8
     except Exception:
         pass
     return ecodes.KEY_V
@@ -363,10 +584,10 @@ def terminal_focused():
 
 def environment_problem():
     """Raison pour laquelle le raccourci ou le collage ne peuvent pas marcher, sinon None."""
-    devices = glob.glob('/dev/input/event*')
-    if devices and not any(os.access(path, os.R_OK) for path in devices):
-        return ("L'accès au clavier est refusé : le raccourci global ne fonctionnera pas.\n\n"
-                "Relancez setup.sh, puis fermez la session et rouvrez-la.")
+    if shutil.which('kwriteconfig6') is None or shutil.which('kreadconfig6') is None:
+        return ("Les outils de configuration de KDE (kwriteconfig6) sont absents : le bouton "
+                "de souris ne pourra pas servir de raccourci.\n\nCette version Wayland "
+                "demande KDE Plasma 6.")
     if not os.access('/dev/uinput', os.W_OK):
         return ("Le clavier virtuel (/dev/uinput) est inaccessible : le collage automatique "
                 "ne fonctionnera pas.\n\nRelancez setup.sh, puis redémarrez l'ordinateur.")

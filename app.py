@@ -131,6 +131,10 @@ PASTE_RELEASE_TIMEOUT = 2.0   # au-delà, le texte attend dans le presse-papier
 # L'application cible lit le presse-papier en traitant Ctrl+V, parfois avec retard.
 CLIPBOARD_RESTORE_DELAY_MS = 300
 DEFAULT_HOTKEY = plateforme.DEFAULT_HOTKEY
+# Wayland : le bureau tient le raccourci (portail de KDE) ; pas de raccourci de pause ni
+# d'Échap global, l'application ne lisant aucune touche : le bouton arrière de la souris
+# annule l'enregistrement.
+HOTKEY_VIA_DESKTOP = getattr(plateforme, 'HOTKEY_VIA_DESKTOP', False)
 
 def describe_hotkey(hotkey):
     """Rend un raccourci lisible : {'modifiers': ['ctrl','alt'], 'vks': [57]} -> 'Ctrl+Alt+9'."""
@@ -146,20 +150,27 @@ def normalize_hotkey(value, default=DEFAULT_HOTKEY):
     """Valide un raccourci lu depuis les préférences, sinon retourne `default`.
 
     Un bouton de souris est noté {'button': 8} avec 'vks' vide : sur un système sans souris
-    pour le raccourci, il retombe sur le défaut."""
+    pour le raccourci, il retombe sur le défaut. Quand le raccourci passe par le bureau
+    (Wayland), l'application ne garde qu'un bouton de souris : la combinaison du clavier se
+    choisit dans KDE."""
     try:
         modifiers = [m for m in MODIFIER_ORDER if m in value['modifiers']]
         button = value.get('button')
         if button is not None and plateforme.SUPPORTS_MOUSE:
             button = int(button)
             if plateforme.MOUSE_BUTTON_MIN <= button <= plateforme.MOUSE_BUTTON_MAX:
+                if HOTKEY_VIA_DESKTOP:
+                    modifiers = []
                 return {'modifiers': modifiers, 'vks': [], 'button': button}
         vks = [int(v) for v in value['vks'] if 0 < int(v) < 256]
-        if vks:
+        if vks and not HOTKEY_VIA_DESKTOP:
             return {'modifiers': modifiers, 'vks': vks}
     except (KeyError, TypeError, ValueError):
         pass
-    return {'modifiers': list(default['modifiers']), 'vks': list(default['vks'])}
+    fallback = {'modifiers': list(default['modifiers']), 'vks': list(default['vks'])}
+    if default.get('button'):
+        fallback['button'] = default['button']
+    return fallback
 
 DEFAULT_PREFS = {
     "selected_model": "whisper-large-v3-turbo-local",
@@ -724,28 +735,38 @@ class VoiceTranscriptionApp:
             anchor="w"
         ).pack(anchor=tk.W, pady=(2, 5))
 
-        tk.Label(
-            options_frame,
-            text="Pause du raccourci:",
-            font=("Arial", 9, "bold"),
-            anchor="w"
-        ).pack(anchor=tk.W, fill=tk.X, pady=(4, 2))
+        if HOTKEY_VIA_DESKTOP:
+            # Pause par l'icône de la barre système : l'application ne lit aucune touche.
+            tk.Button(
+                options_frame,
+                text="Combinaison du clavier (dans KDE)…",
+                font=("Arial", 8),
+                command=self._configure_desktop_keyboard,
+                anchor="w"
+            ).pack(anchor=tk.W, pady=(0, 5))
+        else:
+            tk.Label(
+                options_frame,
+                text="Pause du raccourci:",
+                font=("Arial", 9, "bold"),
+                anchor="w"
+            ).pack(anchor=tk.W, fill=tk.X, pady=(4, 2))
 
-        self.pause_pref_label = tk.Label(
-            options_frame,
-            text=self._pause_description(),
-            font=("Arial", 8),
-            anchor="w"
-        )
-        self.pause_pref_label.pack(anchor=tk.W, fill=tk.X)
+            self.pause_pref_label = tk.Label(
+                options_frame,
+                text=self._pause_description(),
+                font=("Arial", 8),
+                anchor="w"
+            )
+            self.pause_pref_label.pack(anchor=tk.W, fill=tk.X)
 
-        tk.Button(
-            options_frame,
-            text="Modifier la pause…",
-            font=("Arial", 8),
-            command=lambda: self._open_hotkey_dialog('pause'),
-            anchor="w"
-        ).pack(anchor=tk.W, pady=(2, 5))
+            tk.Button(
+                options_frame,
+                text="Modifier la pause…",
+                font=("Arial", 8),
+                command=lambda: self._open_hotkey_dialog('pause'),
+                anchor="w"
+            ).pack(anchor=tk.W, pady=(2, 5))
 
         tk.Frame(options_frame, height=1, bg="#cccccc").pack(fill=tk.X, pady=(4, 8))
 
@@ -1283,6 +1304,11 @@ class VoiceTranscriptionApp:
         return img
 
     def _tray_title(self):
+        if HOTKEY_VIA_DESKTOP:
+            if self.hotkey_paused:
+                return "Transcription Vocale — dictée en pause (menu de l'icône pour la réactiver)"
+            return "Transcription Vocale — dictée active (%s%s)" % (
+                describe_hotkey(self.hotkey), self._cancel_hint())
         if self.hotkey_paused:
             return "Transcription Vocale — dictée en pause (%s pour la réactiver)" % (
                 describe_hotkey(self.pause_hotkey))
@@ -1801,6 +1827,7 @@ class VoiceTranscriptionApp:
         )
         self.cancel_button.pack(side=tk.LEFT, padx=5)
         self.status_label.config(text="🔴 Enregistrement en cours...", fg="red")
+        self._sync_cancel_button()
         
         self.recording_thread = threading.Thread(target=self._record_audio, daemon=True)
         self.recording_thread.start()
@@ -1815,6 +1842,7 @@ class VoiceTranscriptionApp:
             self.audio_frames = []
             if self.recording_model in LOCAL_MODELS:
                 self.local_engine.cancel()
+            self._sync_cancel_button()
             self.play_sound('error.wav', volume=0.3)
             self._reset_ui("Enregistrement annulé")
             self.status_label.config(text="❌ Enregistrement annulé", fg="orange")
@@ -1828,6 +1856,7 @@ class VoiceTranscriptionApp:
             return
         
         self.is_recording = False
+        self._sync_cancel_button()
         
         self.cancel_button.pack_forget()
         
@@ -1877,6 +1906,7 @@ class VoiceTranscriptionApp:
             err = str(e)
             self.root.after(0, lambda: messagebox.showerror("Erreur", f"Erreur d'enregistrement: {err}"))
             self.is_recording = False
+            self.root.after(0, self._sync_cancel_button)
     
     def _auto_stop_recording(self):
         """Arrête automatiquement l'enregistrement après 1 minute"""
@@ -2135,8 +2165,21 @@ class VoiceTranscriptionApp:
         else:
             messagebox.showinfo("Info", "Aucun texte à copier")
     
+    def _cancel_hint(self):
+        """Wayland : mention du bouton qui annule un enregistrement, s'il y en a un."""
+        button = plateforme.desktop_cancel_button(self.hotkey)
+        if not button:
+            return ""
+        return " — %s pour annuler" % plateforme.button_label(button).lower()
+
     def _hotkey_banner(self):
         """Texte du bandeau sous les boutons, reflétant le raccourci courant et la pause."""
+        if HOTKEY_VIA_DESKTOP:
+            if self.hotkey_paused:
+                return "⏸️ %s en pause — menu de l'icône pour la réactiver" % (
+                    describe_hotkey(self.hotkey))
+            return "🖱️ %s (global)%s — pause par le menu de l'icône" % (
+                describe_hotkey(self.hotkey), self._cancel_hint())
         if self.hotkey_paused:
             return "⏸️ %s en pause — %s pour le réactiver" % (
                 describe_hotkey(self.hotkey), describe_hotkey(self.pause_hotkey))
@@ -2177,7 +2220,16 @@ class VoiceTranscriptionApp:
         """Réserve les raccourcis au système (Linux) : les touches ne s'écrivent plus ailleurs.
 
         En pause, seul le raccourci de pause reste réservé : celui de dictée retrouve son
-        effet habituel (bouton de souris dans un jeu, par exemple)."""
+        effet habituel (bouton de souris dans un jeu, par exemple). Sous Wayland, c'est KDE
+        qui transforme le bouton de dictée tant que la dictée est active."""
+        if HOTKEY_VIA_DESKTOP:
+            problem = plateforme.apply_desktop_hotkey(self.hotkey, not self.hotkey_paused,
+                                                      self.is_recording)
+            if problem:
+                print(f"⚠️ {problem}")
+                if notify:
+                    messagebox.showwarning("Raccourci", problem)
+            return
         hotkeys = [dict(self.pause_hotkey, exact=True)]
         if not self.hotkey_paused:
             hotkeys.insert(0, self.hotkey)
@@ -2186,6 +2238,11 @@ class VoiceTranscriptionApp:
             print(f"⚠️ {problem}")
             if notify:
                 messagebox.showwarning("Raccourci", problem)
+
+    def _sync_cancel_button(self):
+        """Wayland : le bouton d'annulation n'est transformé que pendant un enregistrement."""
+        if HOTKEY_VIA_DESKTOP:
+            self._grab_hotkey()
 
     def toggle_hotkey_pause(self):
         """Met le raccourci de dictée en pause, ou l'en sort."""
@@ -2253,6 +2310,9 @@ class VoiceTranscriptionApp:
         Suivi manuel des modificateurs plutôt que `GlobalHotKeys`, sensible à l'ordre et
         au rythme d'arrivée des touches qu'une macro peut émettre en quelques millisecondes.
         """
+        if HOTKEY_VIA_DESKTOP:
+            self._setup_desktop_hotkey()
+            return
         held = set()
 
         def on_press(key, vk):
@@ -2319,6 +2379,48 @@ class VoiceTranscriptionApp:
                                  f"Le raccourci global ne fonctionnera pas :\n{e}\n\n"
                                  f"{plateforme.HOTKEY_FAILURE_HINT}")
 
+    def _setup_desktop_hotkey(self):
+        """Wayland : le portail de KDE signale le raccourci (bouton transformé ou combinaison
+        choisie dans KDE). La première fois, KDE demande d'accepter les raccourcis."""
+        def on_change(action, pressed):
+            self.root.after(0, self._on_desktop_hotkey, action, pressed)
+
+        def on_ready(problem):
+            self.root.after(0, self._on_desktop_hotkey_ready, problem)
+
+        plateforme.prepare_paste()
+        plateforme.start_desktop_hotkey(on_change, on_ready)
+
+    def _on_desktop_hotkey_ready(self, problem):
+        if problem:
+            print(f"⚠️ {problem}")
+            messagebox.showerror("Raccourci",
+                                 f"Le raccourci global ne fonctionnera pas :\n{problem}\n\n"
+                                 f"{plateforme.HOTKEY_FAILURE_HINT}")
+            return
+        self._grab_hotkey(notify=True)
+        print(f"✅ Raccourci {describe_hotkey(self.hotkey)} configuré (portail de KDE)")
+
+    def _on_desktop_hotkey(self, action, pressed):
+        """Appui ou relâchement d'un raccourci signalé par le bureau : 'dictee' ou 'annuler'."""
+        if action == 'annuler':
+            if pressed and self.is_recording and self._hotkey_capture is None:
+                self.cancel_recording()
+            return
+        if not pressed:
+            self._hotkey_down = False
+            return
+        if self.hotkey_paused or self._hotkey_capture is not None:
+            return
+        if self._accept_hotkey_press():
+            self.toggle_recording()
+
+    def _configure_desktop_keyboard(self):
+        """Ouvre la fenêtre de KDE où l'on choisit une combinaison du clavier pour la dictée."""
+        problem = plateforme.configure_desktop_keyboard()
+        if problem:
+            messagebox.showwarning("Raccourci", problem)
+
     def _open_hotkey_dialog(self, target='hotkey'):
         """Capture une combinaison : les modificateurs s'accumulent, la première touche
         normale la fige — l'ordre de pression est donc sans importance.
@@ -2339,17 +2441,22 @@ class VoiceTranscriptionApp:
         dialog.resizable(False, False)
         dialog.protocol("WM_DELETE_WINDOW", self._close_hotkey_dialog)
 
-        tk.Label(
-            dialog,
-            text="Appuyez sur la combinaison souhaitée",
-            font=("Arial", 10, "bold")
-        ).pack(pady=(14, 2))
+        if HOTKEY_VIA_DESKTOP:
+            title = "Cliquez ici avec le bouton de la souris souhaité"
+            hint = ("Un bouton latéral de la souris, cliqué dans cette fenêtre. Pour une "
+                    "combinaison du clavier : « Combinaison du clavier (dans KDE)… » dans les "
+                    "options.")
+        else:
+            title = "Appuyez sur la combinaison souhaitée"
+            hint = ("Maintenez Ctrl, Alt, Maj ou %s, puis appuyez sur la touche finale%s."
+                    % (MODIFIER_LABELS['win'],
+                       " ou sur un bouton latéral de la souris" if with_mouse else ""))
+
+        tk.Label(dialog, text=title, font=("Arial", 10, "bold")).pack(pady=(14, 2))
 
         tk.Label(
             dialog,
-            text="Maintenez Ctrl, Alt, Maj ou %s, puis appuyez sur la touche finale%s."
-                 % (MODIFIER_LABELS['win'],
-                    " ou sur un bouton latéral de la souris" if with_mouse else ""),
+            text=hint,
             font=("Arial", 8),
             fg="gray",
             wraplength=400
@@ -2384,7 +2491,18 @@ class VoiceTranscriptionApp:
         ).pack()
 
         mouse = None
-        if with_mouse:
+        if HOTKEY_VIA_DESKTOP:
+            # La fenêtre est au premier plan : Tk reçoit le clic lui-même, sans rien lire
+            # d'autre. Les boutons latéraux arrivent comme boutons X 8, 9… Le bouton actuel,
+            # transformé par KDE, doit redevenir un bouton pour pouvoir être choisi à nouveau.
+            plateforme.apply_desktop_hotkey(self.hotkey, False)
+
+            def on_tk_click(event):
+                if event.num >= plateforme.MOUSE_BUTTON_MIN:
+                    self._on_capture_button(event.num)
+            dialog.bind('<ButtonPress>', on_tk_click)
+            dialog.bind('<Escape>', lambda _e: self._close_hotkey_dialog())
+        elif with_mouse:
             def on_click(button, pressed):
                 if pressed and button >= plateforme.MOUSE_BUTTON_MIN:
                     self.root.after(0, self._on_capture_button, button)
@@ -2489,6 +2607,8 @@ class VoiceTranscriptionApp:
             capture['dialog'].destroy()
         except Exception:
             pass
+        if HOTKEY_VIA_DESKTOP:
+            self._grab_hotkey()     # rend au bouton de dictée sa transformation
 
 def acquire_single_instance_lock():
     """Retourne le socket verrou, ou None si l'app tourne déjà (et la ramène au premier plan)."""
@@ -2531,6 +2651,13 @@ def main():
         root.withdraw()
     app = VoiceTranscriptionApp(root)
     serve_single_instance_lock(lock, app)
+
+    # Tk ne rend la main à Python qu'à ses propres événements : sans ce réveil régulier, un
+    # SIGTERM (fermeture de session) attendrait le prochain clic avant d'être traité, et le
+    # nettoyage de sortie (bouton de souris rendu à KDE, sous Wayland) n'aurait pas lieu.
+    def wake_for_signals():
+        root.after(500, wake_for_signals)
+    root.after(500, wake_for_signals)
 
     root.protocol("WM_DELETE_WINDOW", app._hide_to_tray)
 

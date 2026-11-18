@@ -16,10 +16,15 @@ Prérequis : **Python 3.10 ou plus récent**, installé avec l'option « Add Pyt
 Pour Debian, Ubuntu, Linux Mint, Kubuntu et leurs dérivés, en session **X11** ou **Wayland** : l'application choisit d'elle-même.
 
 1. `./setup.sh` : installe les paquets du système (mot de passe administrateur demandé), crée l'environnement virtuel, ajoute **Transcription Vocale** au menu des applications et la lance à chaque ouverture de session, rangée dans la barre système (`./start.sh --barre` ; à désactiver dans les réglages du démarrage automatique)
-2. Sous Wayland, la première fois seulement : fermer la session et la rouvrir
-3. Lancer depuis le menu, ou `./start.sh` (`./start_console.sh` pour voir les messages de diagnostic)
+2. Lancer depuis le menu, ou `./start.sh` (`./start_console.sh` pour voir les messages de diagnostic)
+3. Sous Wayland, au premier lancement : accepter les raccourcis dans la fenêtre « Raccourci global demandé » de KDE
 
-Sous Wayland, le système interdit à une application de lire le clavier des autres et de leur envoyer des touches. L'application passe donc par le noyau : `setup.sh` ajoute l'utilisateur au groupe `input` (lecture du clavier et de la souris) et ouvre `/dev/uinput` à la session (clavier virtuel qui envoie Ctrl+V). Le presse-papier passe par `wl-clipboard`. La détection des terminaux, qui collent avec Ctrl+Maj+V, demande KDE Plasma ; ailleurs, l'option manuelle « terminal » reste disponible.
+Sous Wayland, le système n'envoie le clavier et la souris qu'à la fenêtre au premier plan. L'application, qui travaille en arrière-plan, demande donc au bureau, et ne lit aucun périphérique : la version Wayland demande **KDE Plasma 6**.
+
+- **Raccourci** : portail de raccourcis globaux de KDE. KDE intercepte le raccourci, l'empêche d'atteindre la fenêtre active et signale l'appui puis le relâchement.
+- **Bouton de souris** : le portail ne connaît que le clavier. Tant que la dictée est active, KDE transforme le bouton choisi en une touche qu'aucun clavier ne porte (« Lancer 5 »), qui est le raccourci du portail ; en pause ou à la fermeture de l'application, la transformation est retirée et le bouton retrouve son effet habituel. C'est le réglage des boutons de la souris de KDE (`kcminputrc`, groupe `ButtonRebinds`) : un bouton qui y a déjà une autre fonction est refusé. Pendant un enregistrement seulement, le bouton arrière devient de même « Lancer 6 », qui annule.
+- **Collage** : `setup.sh` ouvre `/dev/uinput` à la session, pour un clavier virtuel qui envoie Ctrl+V, en écriture seule.
+- **Presse-papier** : `wl-clipboard`. La détection des terminaux, qui collent avec Ctrl+Maj+V, passe par un script KWin ; ailleurs, l'option manuelle « terminal » reste disponible.
 
 Le modèle par défaut, **Whisper large-v3 turbo local**, ne demande ni compte ni clé : à la première dictée, l'application propose de télécharger son fichier (≈ 890 Mo). Les autres modèles locaux se téléchargent de la même façon quand on les choisit. La carte graphique est utilisée par son pilote habituel (Vulkan, présent avec les pilotes NVIDIA, AMD et Intel récents) ; sans carte graphique compatible, le processeur prend le relais, plus lentement.
 
@@ -27,9 +32,9 @@ Pour les modèles OpenAI, la clé API se configure dans l'interface (bouton **«
 
 ## Utilisation
 
-- **Ctrl+Alt+9** par défaut (pavé numérique ou rangée du haut) : démarre et arrête l'enregistrement, depuis n'importe quelle application
-- **Échap** pendant l'enregistrement : annule, sans appel ni coût
-- **Ctrl + 9 du pavé numérique** par défaut : met le raccourci de dictée en pause, et l'en sort. En pause, la touche ou le bouton de souris du raccourci retrouve son effet habituel (dans un jeu, par exemple) ; l'icône de la barre système passe du vert au gris barré. Se règle dans le panneau d'options (**« Modifier la pause… »**) ou par le menu de l'icône, et reste mémorisé d'une session à l'autre
+- **Ctrl+Alt+9** par défaut (pavé numérique ou rangée du haut ; sous Wayland, **bouton avant de la souris**) : démarre et arrête l'enregistrement, depuis n'importe quelle application
+- **Échap** pendant l'enregistrement : annule, sans appel ni coût (sous Wayland : **bouton arrière de la souris**, transformé par KDE le temps de l'enregistrement seulement, ou bouton **Annuler** de la fenêtre)
+- **Ctrl + 9 du pavé numérique** par défaut : met le raccourci de dictée en pause, et l'en sort. En pause, la touche ou le bouton de souris du raccourci retrouve son effet habituel (dans un jeu, par exemple) ; l'icône de la barre système passe du vert au gris barré. Se règle dans le panneau d'options (**« Modifier la pause… »**) ou par le menu de l'icône, et reste mémorisé d'une session à l'autre. Sous Wayland, la pause se fait par le menu de l'icône seulement
 - **Ctrl+Z / Ctrl+Y** dans la fenêtre : défait et refait les modifications de la transcription, sans limite tant que l'application reste ouverte
 
 Le texte transcrit est collé dans le champ actif et/ou copié dans le presse-papier, selon deux options indépendantes. La croix de la fenêtre réduit l'application dans la barre système (configurable) ; clic droit sur l'icône pour **Afficher** ou **Quitter**.
@@ -43,6 +48,8 @@ Une touche seule, sans Ctrl ni Alt, est acceptée, mais elle se déclenche aussi
 Le raccourci est écouté au niveau du système : clavier, souris à macros, pédale ou StreamDeck le déclenchent de la même façon.
 
 Sous Linux, le raccourci est en plus **réservé** à l'application : la touche lance la dictée sans parvenir à la fenêtre active (le 9 du pavé numérique ne s'écrit plus nulle part), et une touche seule devient utilisable. Un **bouton latéral de la souris** (arrière, avant ou suivants), seul ou avec Ctrl, Alt, Maj ou Super, peut aussi servir de raccourci, sans outil tiers ; il perd alors son effet habituel. Si une autre application ou un raccourci du système tient déjà la combinaison, l'application le signale.
+
+Sous Wayland, **« Modifier le raccourci… »** attend un clic, dans sa fenêtre, avec le bouton de souris voulu. Une combinaison du clavier se choisit dans la fenêtre des raccourcis de KDE : bouton **« Combinaison du clavier (dans KDE)… »** du panneau d'options. KDE la garde pour lui, même en pause.
 
 ## Modèles
 
