@@ -37,7 +37,7 @@ Pour les modèles OpenAI, la clé API se configure dans l'interface (bouton **«
 - **Ctrl + 9 du pavé numérique** par défaut : met le raccourci de dictée en pause, et l'en sort. En pause, la touche ou le bouton de souris du raccourci retrouve son effet habituel (dans un jeu, par exemple) ; l'icône de la barre système passe du vert au gris barré. Se règle dans le panneau d'options (**« Modifier la pause… »**) ou par le menu de l'icône, et reste mémorisé d'une session à l'autre. Sous Wayland, la pause se fait par le menu de l'icône seulement
 - **Ctrl+Z / Ctrl+Y** dans la fenêtre : défait et refait les modifications de la transcription, sans limite tant que l'application reste ouverte
 
-Le texte transcrit est collé dans le champ actif et/ou copié dans le presse-papier, selon deux options indépendantes. La croix de la fenêtre réduit l'application dans la barre système (configurable) ; clic droit sur l'icône pour **Afficher** ou **Quitter**.
+Le texte transcrit est collé dans le champ actif et/ou copié dans le presse-papier, selon deux options indépendantes. La croix de la fenêtre réduit l'application dans la barre système (configurable) ; clic droit sur l'icône pour **Afficher** la fenêtre au premier plan, **Copier la dernière transcription** (quand le collage est parti dans le mauvais champ), mettre la dictée en pause ou **Quitter**.
 
 ### Changer le raccourci
 

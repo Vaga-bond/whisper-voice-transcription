@@ -552,6 +552,7 @@ class VoiceTranscriptionApp:
         self.session_started_at = datetime.now()
 
         self.history = self._load_history()
+        self.last_transcription = None   # pour « Copier la dernière transcription » de l'icône
 
         self.hotkey_thread = None
         self.esc_thread = None
@@ -1345,8 +1346,13 @@ class VoiceTranscriptionApp:
             def on_pause(icon, item):
                 self.root.after(0, self.toggle_hotkey_pause)
 
+            def on_copy_last(icon, item):
+                self.root.after(0, self._copy_last_transcription)
+
             menu = pystray.Menu(
                 pystray.MenuItem("Afficher", on_show, default=True),
+                pystray.MenuItem("Copier la dernière transcription", on_copy_last,
+                                 enabled=lambda item: bool(self.last_transcription)),
                 pystray.MenuItem(
                     lambda item: ("Réactiver la dictée" if self.hotkey_paused
                                   else "Mettre la dictée en pause"),
@@ -1377,10 +1383,32 @@ class VoiceTranscriptionApp:
             self.tray_icon = None
 
     def _restore_window(self):
-        """Ré-affiche la fenêtre principale depuis la tray."""
+        """Ré-affiche la fenêtre principale depuis la tray, au premier plan."""
         self.root.deiconify()
         self.root.lift()
         self.root.focus_force()
+        # Sous Wayland, KDE refuse qu'une application d'arrière-plan prenne le premier plan :
+        # on le lui demande, une fois la fenêtre affichée.
+        bring_to_front = getattr(plateforme, 'bring_to_front', None)
+        if bring_to_front is not None:
+            self.root.after(150, lambda: threading.Thread(
+                target=bring_to_front, args=(self.root.title(),), daemon=True).start())
+
+    def _copy_last_transcription(self):
+        """Remet la dernière transcription dans le presse-papier (collage manqué)."""
+        text = self.last_transcription
+        if not text:
+            return
+        try:
+            pyperclip.copy(text)
+        except Exception as e:
+            print(f"⚠️ Copie impossible : {e}")
+            if hasattr(self, 'overlay'):
+                self.overlay.show_briefly("⚠️ Copie impossible", bg="#ff9800", duration_ms=1800)
+            return
+        if hasattr(self, 'overlay'):
+            self.overlay.show_briefly("📋 Dernière transcription copiée", bg="#2e7d32",
+                                      duration_ms=1500)
 
     def _hide_to_tray(self):
         """Appelé sur clic X. Respecte la préférence utilisateur :
@@ -2013,6 +2041,10 @@ class VoiceTranscriptionApp:
         self.text_area.insert(tk.END, text + "\n\n")
         self.text_area.edit_separator()
         self.text_area.see(tk.END)
+        first = not self.last_transcription
+        self.last_transcription = text
+        if first:
+            self._update_tray()      # active l'entrée « Copier la dernière transcription »
 
         if self.auto_paste_var.get():
             self._paste_when_released(text, time.monotonic() + PASTE_RELEASE_TIMEOUT)

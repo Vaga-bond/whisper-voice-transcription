@@ -574,6 +574,41 @@ def _quietly(fn):
         pass
 
 
+def bring_to_front(title):
+    """Met au premier plan la fenêtre de l'application, par un script KWin d'un instant :
+    KDE refuse sinon qu'une application d'arrière-plan prenne le premier plan."""
+    import json
+    try:
+        import gi
+        gi.require_version('Gio', '2.0')
+        from gi.repository import Gio, GLib
+        script = (
+            'for (const fenetre of workspace.windowList()) {\n'
+            '    if (fenetre.pid === %d && fenetre.caption === %s) {\n'
+            '        workspace.activeWindow = fenetre;\n'
+            '        break;\n'
+            '    }\n'
+            '}\n'
+        ) % (os.getpid(), json.dumps(title))
+        name = _KWIN_SCRIPT_NAME + '-premier-plan'
+        folder = os.environ.get('XDG_RUNTIME_DIR') or tempfile.gettempdir()
+        path = os.path.join(folder, name + '.js')
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(script)
+        bus = Gio.bus_get_sync(Gio.BusType.SESSION)
+        scripting = Gio.DBusProxy.new_sync(bus, Gio.DBusProxyFlags.NONE, None, 'org.kde.KWin',
+                                           '/Scripting', 'org.kde.kwin.Scripting', None)
+        unload = GLib.Variant('(s)', (name,))
+        scripting.call_sync('unloadScript', unload, Gio.DBusCallFlags.NONE, -1, None)
+        scripting.call_sync('loadScript', GLib.Variant('(ss)', (path, name)),
+                            Gio.DBusCallFlags.NONE, -1, None)
+        scripting.call_sync('start', None, Gio.DBusCallFlags.NONE, -1, None)
+        time.sleep(1)     # KWin lit le fichier du script en différé : le laisser s'exécuter
+        scripting.call_sync('unloadScript', unload, Gio.DBusCallFlags.NONE, -1, None)
+    except Exception as e:
+        print(f"⚠️ Fenêtre non mise au premier plan : {e}")
+
+
 def terminal_focused():
     """La fenêtre au premier plan est-elle un terminal connu ?"""
     _watch_active_window()
